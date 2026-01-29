@@ -1,0 +1,730 @@
+# Gitsave - 游戏存档 Git 管理工具
+
+[![Rust](https://img.shields.io/badge/Rust-1.70+-orange?logo=rust)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](https://opensource.org/licenses/MIT)
+
+Gitsave 是一个专为游戏存档设计的 Git 管理工具，简化了 Git 的使用流程，让玩家轻松管理游戏进度。
+
+## 特性
+
+- **简化的工作流**: 无需理解 Git 的暂存区概念，一键保存/加载
+- **路线管理**: 像 Git 分支一样管理不同游戏路线（多周目、不同选择）
+- **标签系统**: 标记重要存档点（如"最终存档"、"重要选择"）
+- **自动保存**: 支持配置自动保存，定时或按需
+- **存档对比**: 比较两个存档的差异
+- **导入导出**: 轻松备份和恢复存档
+
+## 安装
+
+```bash
+cargo build --release
+cp target/release/gitsave ~/.local/bin/
+```
+
+或者从源码编译：
+
+```bash
+git clone https://github.com/yourusername/gitsave.git
+cd gitsave
+cargo build --release
+```
+
+## 快速开始
+
+```bash
+# 1. 初始化存档仓库
+cd /path/to/game/saves
+gitsave init
+
+# 2. 保存当前进度
+gitsave save "完成第一章"
+
+# 3. 查看历史
+gitsave history
+
+# 4. 加载历史存档
+gitsave load "第一章"
+```
+
+## 命令参考
+
+### init - 初始化存档仓库
+
+在指定目录初始化新的 gitsave 仓库。
+
+```bash
+gitsave init [PATH]
+```
+
+| 参数 | 说明 |
+|------|------|
+| `PATH` | 存档目录路径，默认为当前目录 |
+
+**示例:**
+
+```bash
+# 初始化当前目录
+gitsave init
+
+# 初始化指定目录
+gitsave init ./game_saves
+```
+
+**输出:**
+
+```
+[OK] Initialized gitsave repository
+  Location: /path/to/game/saves
+  Git path: /path/to/game/saves/.git/
+```
+
+---
+
+### save - 保存存档
+
+保存当前游戏状态。
+
+```bash
+gitsave save [OPTIONS] [MESSAGE]
+```
+
+| 参数 | 说明 |
+|------|------|
+| `MESSAGE` | 存档描述信息 |
+
+| 选项 | 说明 |
+|------|------|
+| `-m, --message <MESSAGE>` | 使用命令行消息 |
+| `--save-dir <DIR>` | 指定存档目录 |
+
+**示例:**
+
+```bash
+# 使用自动时间戳保存
+gitsave save
+
+# 指定描述
+gitsave save "击败第一个Boss"
+
+# 使用 -m 标志
+gitsave save -m "获得强力装备"
+```
+
+**输出:**
+
+```
+[OK] Save successful!
+  ID: a1b2c3d
+  Message: 击败第一个Boss
+  Files changed: 3
+```
+
+---
+
+### load - 加载存档
+
+加载指定的历史存档。
+
+```bash
+gitsave load [OPTIONS] [IDENTIFIER]
+```
+
+| 参数 | 说明 |
+|------|------|
+| `IDENTIFIER` | 存档标识（哈希、描述、标签） |
+
+| 选项 | 说明 |
+|------|------|
+| `-l, --list` | 列出所有可用存档 |
+| `-p, --preview` | 预览模式，不实际回退 |
+| `-f, --force` | 强制回退，丢弃未保存更改 |
+| `-t, --tag <TAG>` | 通过标签加载存档 |
+
+**示例:**
+
+```bash
+# 列出所有存档
+gitsave load --list
+
+# 使用描述加载
+gitsave load "击败Boss"
+
+# 使用短哈希加载
+gitsave load a1b2c3d
+
+# 预览加载（不实际回退）
+gitsave load --preview "重要选择"
+
+# 通过标签加载
+gitsave load --tag "最终存档"
+
+# 强制加载（丢弃未保存更改）
+gitsave load --force a1b2c3d
+```
+
+**输出 (--list):**
+
+```
+Available saves:
+  a1b2c3d  - 击败第一个Boss  (current)
+  c3d4e5f  - 获得神器
+  e5f6g7h  - 重要选择
+```
+
+---
+
+### status - 查看状态
+
+查看当前存档状态。
+
+```bash
+gitsave status
+```
+
+**示例:**
+
+```bash
+gitsave status
+```
+
+**输出:**
+
+```
+Status:
+  Current route: main
+  Last save: a1b2c3d - 击败Boss  2小时前
+  Uncommitted changes: 3 files
+    + new_save.dat
+    ~ settings.ini
+    - old_backup.dat
+```
+
+---
+
+### history - 查看历史
+
+查看存档历史记录。
+
+```bash
+gitsave history [OPTIONS]
+```
+
+| 选项 | 说明 |
+|------|------|
+| `-v, --verbose` | 显示详细时间信息 |
+| `-r, --route <ROUTE>` | 筛选特定路线的历史 |
+
+**示例:**
+
+```bash
+# 基本历史
+gitsave history
+
+# 详细历史（显示时间戳）
+gitsave history --verbose
+
+# 筛选特定路线
+gitsave history --route="完美结局线"
+```
+
+**输出:**
+
+```
+a1b2c3d  * 击败Boss                    2小时前
+c3d4e5f    获得神器                      5小时前
+e5f6g7h    重要选择                      1天前
+g7h8i9j    初始存档                      2天前
+```
+
+---
+
+### compare - 比较存档
+
+比较两个存档的差异。
+
+```bash
+gitsave compare <SAVE1> <SAVE2>
+```
+
+| 参数 | 说明 |
+|------|------|
+| `SAVE1` | 第一个存档标识 |
+| `SAVE2` | 第二个存档标识 |
+
+**示例:**
+
+```bash
+# 比较两个存档
+gitsave compare "击败Boss" "获得神器"
+
+# 使用哈希比较
+gitsave compare a1b2c3d c3d4e5f
+```
+
+**输出:**
+
+```
+Comparing a1b2c3d and c3d4e5f
+Additions: 5, Deletions: 2
+  equipment.json: +3 -1
+  inventory.bin: +2 -1
+```
+
+---
+
+### route - 路线管理
+
+管理游戏路线（类似 Git 分支）。
+
+```bash
+gitsave route [COMMAND]
+```
+
+| 子命令 | 说明 |
+|--------|------|
+| `list` | 列出所有路线 |
+| `create <NAME>` | 创建新路线 |
+| `switch <NAME>` | 切换到指定路线 |
+| `switch -c <NAME>` | 创建并切换到新路线 |
+| `delete <NAME>` | 删除路线 |
+| `rename <OLD> <NEW>` | 重命名路线 |
+
+#### route list - 列出路线
+
+```bash
+gitsave route list
+```
+
+**示例输出:**
+
+```
+Routes:
+  main (current) - 击败Boss  2小时前
+  完美结局线  - 选择天使路线  3天前
+  恶魔路线    - 击败最终Boss  1周前
+```
+
+#### route create - 创建路线
+
+```bash
+gitsave route create <NAME>
+```
+
+**示例:**
+
+```bash
+# 创建新路线
+gitsave route create "完美结局线"
+```
+
+**输出:**
+
+```
+[OK] Created route: 完美结局线
+```
+
+#### route switch - 切换路线
+
+```bash
+gitsave route switch <NAME>
+```
+
+**示例:**
+
+```bash
+# 切换到已有路线
+gitsave route switch "完美结局线"
+```
+
+**输出:**
+
+```
+[OK] Switched to route: 完美结局线
+```
+
+#### route switch -c - 创建并切换
+
+```bash
+gitsave route switch -c <NAME>
+```
+
+**示例:**
+
+```bash
+# 从当前路线创建并切换到新路线
+gitsave route switch -c "恶魔路线"
+```
+
+**输出:**
+
+```
+[OK] Created and switched to route: 恶魔路线
+```
+
+#### route delete - 删除路线
+
+```bash
+gitsave route delete <NAME>
+```
+
+**示例:**
+
+```bash
+gitsave route delete "失败存档"
+```
+
+**输出:**
+
+```
+[OK] Deleted route: 失败存档
+```
+
+**注意:** 无法删除当前路线，需要先切换到其他路线。
+
+#### route rename - 重命名路线
+
+```bash
+gitsave route rename <OLD_NAME> <NEW_NAME>
+```
+
+**示例:**
+
+```bash
+gitsave route rename "old-name" "new-name"
+```
+
+**输出:**
+
+```
+[OK] Renamed route: old-name -> new-name
+```
+
+---
+
+### tag - 标签管理
+
+标记重要存档点。
+
+```bash
+gitsave tag [OPTIONS] [NAME] [MESSAGE]
+```
+
+| 选项 | 说明 |
+|------|------|
+| `-l, --list` | 列出所有标签 |
+| `-d, --delete` | 删除标签 |
+
+**示例:**
+
+```bash
+# 创建标签
+gitsave tag "最终存档" "打最终Boss前的准备"
+
+# 列出标签
+gitsave tag --list
+
+# 删除标签
+gitsave tag --delete "最终存档"
+```
+
+**输出 (--list):**
+
+```
+Tags:
+  最终存档  - 打最终Boss前的准备
+  v1.0      - 游戏发布版本
+```
+
+---
+
+### export - 导出存档
+
+导出整个存档仓库。
+
+```bash
+gitsave export <PATH>
+```
+
+| 参数 | 说明 |
+|------|------|
+| `PATH` | 目标文件路径 |
+
+**示例:**
+
+```bash
+# 导出到文件
+gitsave export ./my_save_backup.gsf
+
+# 导出到目录
+gitsave export /path/to/backup/
+```
+
+---
+
+### import - 导入存档
+
+从备份导入存档仓库。
+
+```bash
+gitsave import <PATH>
+```
+
+| 参数 | 说明 |
+|------|------|
+| `PATH` | 源文件或目录路径 |
+
+**示例:**
+
+```bash
+# 从文件导入
+gitsave import ./my_save_backup.gsf
+
+# 从目录导入
+gitsave import /path/to/backup/
+```
+
+---
+
+### config - 配置管理
+
+查看或设置配置。
+
+```bash
+gitsave config [set <KEY>=<VALUE>]
+```
+
+**示例:**
+
+```bash
+# 查看当前配置
+gitsave config
+
+# 设置配置项
+gitsave config set save.max_history=100
+gitsave config set auto_save.enabled=true
+```
+
+**输出:**
+
+```
+Configuration:
+[save]
+max_history = 50
+compression = 6
+
+[auto_save]
+enabled = false
+```
+
+---
+
+### autosave - 自动保存配置
+
+配置自动保存功能。
+
+```bash
+gitsave autosave [OPTIONS]
+```
+
+| 选项 | 说明 |
+|------|------|
+| `--enable` | 启用自动保存 |
+| `--disable` | 禁用自动保存 |
+| `--interval <SECONDS>` | 设置保存间隔（秒，最小 60） |
+| `--max-count <COUNT>` | 设置最大保存数量（1-100） |
+| `--status` | 显示当前配置 |
+
+**示例:**
+
+```bash
+# 查看当前配置
+gitsave autosave --status
+
+# 启用自动保存（默认设置）
+gitsave autosave --enable
+
+# 启用并设置间隔为 60 秒
+gitsave autosave --enable --interval 60
+
+# 启用并设置间隔 5 分钟，保留 20 个自动保存
+gitsave autosave --enable --interval 300 --max-count 20
+
+# 禁用自动保存
+gitsave autosave --disable
+```
+
+**输出 (--status):**
+
+```
+Auto-save configuration:
+  Enabled: yes
+  Interval: 300 seconds
+  Max count: 10
+  Last auto-save: never
+```
+
+---
+
+## 配置文件
+
+Gitsave 使用 `gitsave.toml` 文件存储配置。
+
+```toml
+# gitsave.toml
+
+[save]
+max_history = 50
+compression = 6
+
+[auto_save]
+enabled = false
+interval = 300
+max_count = 10
+```
+
+---
+
+## 工作流程示例
+
+### 多周目游戏管理
+
+```bash
+# 初始路线完成游戏
+gitsave save "第一周目完成"
+gitsave tag "week1-complete" "第一周目通关"
+
+# 创建第二周目路线
+gitsave route switch -c "第二周目"
+
+# 进行不同选择
+gitsave save "选择了恶魔路线"
+
+# 查看两个路线的差异
+gitsave compare "week1-complete" "第二周目"
+```
+
+### 重要决策点标记
+
+```bash
+# 在重要选择前创建标签
+gitsave tag "before-final-choice" "最终选择前的存档"
+
+# 做出选择后继续游戏
+gitsave save "选择了拯救世界"
+
+# 之后可以随时回滚到决策点
+gitsave load --tag "before-final-choice"
+```
+
+### 存档备份
+
+```bash
+# 定期导出完整存档
+gitsave export ./backups/save_$(date +%Y%m%d).gsf
+
+# 从备份恢复
+gitsave import ./backups/save_20240115.gsf
+```
+
+---
+
+## 路线管理策略
+
+### 线性游戏路线
+
+```
+main (主线剧情)
+    |
+    |-- normal-ending (普通结局)
+    |-- good-ending (好结局)
+    |-- best-ending (最佳结局)
+```
+
+### 分支剧情路线
+
+```
+main
+    |-- route-a (路线A)
+    |   |-- route-a-1 (路线A 变体)
+    |-- route-b (路线B)
+```
+
+---
+
+## 常见问题
+
+### Q: 误删了存档怎么办？
+
+使用 Git 的 reflog 功能恢复：
+
+```bash
+git reflog
+git checkout <commit-hash>
+```
+
+### Q: 可以和原生 Git 混用吗？
+
+可以，但建议：
+- 只在需要高级功能时使用 Git
+- 避免直接修改 `.git` 目录
+- 使用 `gitsave export` 备份后操作
+
+### Q: 自动保存会占用很多空间吗？
+
+默认保留 10 个自动保存，可以通过 `--max-count` 调整：
+
+```bash
+gitsave autosave --enable --max-count 5
+```
+
+### Q: 如何迁移到新电脑？
+
+```bash
+# 在旧电脑导出
+gitsave export ./backup.gsf
+
+# 传输到新电脑后导入
+gitsave import ./backup.gsf
+```
+
+---
+
+## 高级用法
+
+### 批量操作脚本
+
+```bash
+#!/bin/bash
+# 自动保存脚本
+
+cd /path/to/game/saves
+
+# 检查是否有未保存更改
+if [ -n "$(git status --porcelain)" ]; then
+    TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
+    gitsave save "自动保存: $TIMESTAMP"
+    echo "自动保存完成: $TIMESTAMP"
+else
+    echo "没有需要保存的更改"
+fi
+```
+
+### 定时自动保存 (cron)
+
+```bash
+# 编辑 crontab
+crontab -e
+
+# 添加：每 5 分钟自动保存
+*/5 * * * * /path/to/autosave.sh
+```
+
+---
+
+## 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+## 许可证
+
+MIT License

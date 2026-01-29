@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use cli::{parse_args, Cli, Commands, RouteCommands};
 use error::SaveError;
 use git::Git2Core;
-use manager::{RouteManager, SaveManager};
+use manager::{ConfigManager, RouteManager, SaveManager};
 use std::path::{Path, PathBuf};
 
 fn get_save_dir(cli: &Cli) -> PathBuf {
@@ -39,11 +39,90 @@ enabled = false
     Ok(())
 }
 
+fn handle_autosave(
+    save_dir: &Path,
+    enable: bool,
+    interval: Option<u64>,
+    max_count: Option<u32>,
+    status: bool,
+    disable: bool,
+) {
+    let config_manager = ConfigManager::new(save_dir);
+    let mut config = config_manager.load_auto_save_config();
+
+    if status {
+        println!("Auto-save configuration:");
+        println!("  Enabled: {}", if config.enabled { "yes" } else { "no" });
+        println!("  Interval: {} seconds", config.interval);
+        println!("  Max count: {}", config.max_count);
+        if let Some(last) = config.last_save_time {
+            let last_time = chrono::DateTime::from_timestamp(last, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            println!("  Last auto-save: {}", last_time);
+        } else {
+            println!("  Last auto-save: never");
+        }
+        return;
+    }
+
+    if disable {
+        config.enabled = false;
+        if let Err(e) = config_manager.save_auto_save_config(&config) {
+            eprintln!("[ERROR] Failed to disable auto-save: {}", e);
+            std::process::exit(1);
+        }
+        println!("[OK] Auto-save disabled");
+        return;
+    }
+
+    let mut changed = false;
+    if enable {
+        config.enabled = true;
+        changed = true;
+    }
+    if let Some(interval_val) = interval {
+        if interval_val < 60 {
+            eprintln!("[ERROR] Interval must be at least 60 seconds");
+            std::process::exit(1);
+        }
+        config.interval = interval_val;
+        changed = true;
+    }
+    if let Some(max_count_val) = max_count {
+        if max_count_val == 0 || max_count_val > 100 {
+            eprintln!("[ERROR] Max count must be between 1 and 100");
+            std::process::exit(1);
+        }
+        config.max_count = max_count_val;
+        changed = true;
+    }
+
+    if changed {
+        if let Err(e) = config_manager.save_auto_save_config(&config) {
+            eprintln!("[ERROR] Failed to save auto-save config: {}", e);
+            std::process::exit(1);
+        }
+        println!("[OK] Auto-save configuration updated:");
+        println!("  Enabled: {}", if config.enabled { "yes" } else { "no" });
+        println!("  Interval: {} seconds", config.interval);
+        println!("  Max count: {}", config.max_count);
+    } else {
+        println!("No changes specified. Use:");
+        println!("  gitsave autosave --enable           # Enable auto-save");
+        println!("  gitsave autosave --disable          # Disable auto-save");
+        println!("  gitsave autosave --interval 300     # Set interval in seconds");
+        println!("  gitsave autosave --max_count 10     # Set max auto-saves to keep");
+        println!("  gitsave autosave --status           # Show current settings");
+    }
+}
+
 fn handle_save(save_dir: &Path, message: &str) -> Result<()> {
     let mut core = Git2Core::open(save_dir).context("Failed to open repository")?;
     let mut manager = SaveManager::new(core);
 
     let result = manager.save(message).context("Failed to save")?;
+    manager.update_last_save_time();
     println!("[OK] Save successful!");
     println!("  ID: {}", result.short_oid);
     println!("  Message: {}", result.message);
@@ -56,10 +135,11 @@ fn handle_load(
     list: bool,
     preview: bool,
     _force: bool,
+    tag: &Option<String>,
     identifier: &Option<String>,
 ) -> Result<()> {
     let core = Git2Core::open(save_dir).context("Failed to open repository")?;
-    let manager = SaveManager::new(core);
+    let mut manager = SaveManager::new(core);
 
     if list {
         let saves = manager.list_saves().context("Failed to list saves")?;
@@ -70,6 +150,22 @@ fn handle_load(
             for save in saves {
                 let current = if save.is_current { " (current)" } else { "" };
                 println!("  {} - {}{}", save.short_id, save.message, current);
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some(tag_name) = tag {
+        if preview {
+            println!("Would load tag: {}", tag_name);
+            return Ok(());
+        }
+
+        match manager.load_by_tag(tag_name, _force) {
+            Ok(()) => println!("Loaded tag: {}", tag_name),
+            Err(e) => {
+                eprintln!("[ERROR] Failed to load tag '{}': {}", tag_name, e);
+                std::process::exit(1);
             }
         }
         return Ok(());
@@ -256,6 +352,37 @@ fn handle_route(save_dir: &Path, command: &Option<RouteCommands>) -> Result<()> 
                 }
             }
         }
+        Some(RouteCommands::Rename { old_name, new_name }) => {
+            let all_routes = manager.list_routes().context("Failed to list routes")?;
+            let old_exists = all_routes.iter().any(|r| r.name == *old_name);
+
+            if !old_exists {
+                eprintln!("[ERROR] Route not found: {}", old_name);
+                if !all_routes.is_empty() {
+                    eprintln!("\nAvailable routes:");
+                    for route in all_routes {
+                        let current = if route.is_current { " (current)" } else { "" };
+                        eprintln!("  {}{}", route.name, current);
+                    }
+                }
+                eprintln!("\nUse 'gitsave route --list' to see all routes");
+                std::process::exit(1);
+            }
+
+            let new_exists = all_routes.iter().any(|r| r.name == *new_name);
+            if new_exists {
+                eprintln!("[ERROR] Route '{}' already exists", new_name);
+                std::process::exit(1);
+            }
+
+            match manager.rename_route(old_name, new_name) {
+                Ok(()) => println!("[OK] Renamed route: {} -> {}", old_name, new_name),
+                Err(e) => {
+                    eprintln!("[ERROR] Failed to rename route: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         None => {
             let current_route = manager
                 .get_current_route()
@@ -310,9 +437,10 @@ fn main() {
             list,
             preview,
             force,
+            tag,
             identifier,
         } => {
-            if let Err(e) = handle_load(&save_dir, *list, *preview, *force, identifier) {
+            if let Err(e) = handle_load(&save_dir, *list, *preview, *force, tag, identifier) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -343,9 +471,33 @@ fn main() {
         }
         Commands::Tag {
             list,
+            delete,
             name,
             message,
         } => {
+            if *delete {
+                if let Some(tag_name) = name {
+                    match Git2Core::open(&save_dir) {
+                        Ok(core) => {
+                            let manager = SaveManager::new(core);
+                            if let Err(e) = manager.delete_tag(&tag_name) {
+                                eprintln!("Error: Failed to delete tag: {}", e);
+                                std::process::exit(1);
+                            }
+                            println!("Deleted tag: {}", tag_name);
+                        }
+                        Err(e) => {
+                            eprintln!("Error: Failed to open repository: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!("Error: Tag name required for --delete");
+                    std::process::exit(1);
+                }
+                return;
+            }
+
             if *list {
                 match Git2Core::open(&save_dir) {
                     Ok(core) => {
@@ -490,6 +642,15 @@ fn main() {
                     }
                 }
             }
+        }
+        Commands::Autosave {
+            enable,
+            interval,
+            max_count,
+            status,
+            disable,
+        } => {
+            handle_autosave(&save_dir, *enable, *interval, *max_count, *status, *disable);
         }
     }
 }

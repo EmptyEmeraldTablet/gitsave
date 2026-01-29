@@ -42,6 +42,9 @@ pub enum Commands {
         #[arg(short, long)]
         force: bool,
 
+        #[arg(short, long, value_name = "TAG")]
+        tag: Option<String>,
+
         identifier: Option<String>,
     },
 
@@ -71,6 +74,9 @@ pub enum Commands {
         #[arg(short, long)]
         list: bool,
 
+        #[arg(short, long)]
+        delete: bool,
+
         name: Option<String>,
         message: Option<String>,
     },
@@ -85,6 +91,24 @@ pub enum Commands {
     Config {
         #[arg(short, long)]
         set: Option<String>,
+    },
+
+    #[command(about = "Configure auto-save settings")]
+    Autosave {
+        #[arg(short, long, action = clap::ArgAction::SetTrue)]
+        enable: bool,
+
+        #[arg(short, long, value_name = "SECONDS")]
+        interval: Option<u64>,
+
+        #[arg(short, long, value_name = "COUNT")]
+        max_count: Option<u32>,
+
+        #[arg(short, long, action = clap::ArgAction::SetTrue)]
+        status: bool,
+
+        #[arg(short, long, action = clap::ArgAction::SetTrue)]
+        disable: bool,
     },
 }
 
@@ -106,6 +130,9 @@ pub enum RouteCommands {
 
     #[command(about = "Delete a route")]
     Delete { name: String },
+
+    #[command(about = "Rename a route")]
+    Rename { old_name: String, new_name: String },
 }
 
 pub fn parse_args() -> Cli {

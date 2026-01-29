@@ -29,6 +29,10 @@ impl Git2Core {
         &self.repo
     }
 
+    pub fn workdir(&self) -> &PathBuf {
+        &self.workdir
+    }
+
     pub fn commit(&mut self, message: &str) -> Result<SaveResult> {
         let mut index = self.repo.index().map_err(SaveError::Repository)?;
         let tree_id = index.write_tree().map_err(SaveError::Repository)?;
@@ -255,6 +259,67 @@ impl Git2Core {
             .map_err(SaveError::Repository)?;
 
         branch.delete().map_err(SaveError::Repository)?;
+        Ok(())
+    }
+
+    pub fn rename_route(&mut self, old_name: &str, new_name: &str) -> Result<()> {
+        let mut branch = self
+            .repo
+            .find_branch(old_name, BranchType::Local)
+            .map_err(SaveError::Repository)?;
+
+        let commit = branch
+            .get()
+            .peel_to_commit()
+            .map_err(SaveError::Repository)?;
+
+        branch.delete().map_err(SaveError::Repository)?;
+
+        self.repo
+            .branch(new_name, &commit, false)
+            .map_err(SaveError::Repository)?;
+
+        Ok(())
+    }
+
+    pub fn delete_tag(&self, name: &str) -> Result<()> {
+        self.repo.tag_delete(name).map_err(SaveError::Repository)?;
+        Ok(())
+    }
+
+    pub fn get_tag_commit(&self, tag_name: &str) -> Result<Commit> {
+        let tag_names = self.repo.tag_names(None)?;
+        let mut tag_oid = None;
+        for name in tag_names.iter() {
+            if let Some(name) = name {
+                if name == tag_name {
+                    if let Ok(oid) = self.repo.refname_to_id(&format!("refs/tags/{}", name)) {
+                        tag_oid = Some(oid);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let oid = tag_oid.ok_or_else(|| SaveError::SaveNotFound(tag_name.to_string()))?;
+        let tag = self.repo.find_tag(oid).map_err(SaveError::Repository)?;
+        let object = tag.into_object();
+        let commit = object.peel_to_commit().map_err(SaveError::Repository)?;
+        Ok(commit)
+    }
+
+    pub fn checkout_by_tag(&mut self, tag_name: &str) -> Result<()> {
+        let commit = self.get_tag_commit(tag_name)?;
+        let head = self.repo.head().ok();
+        let head_oid = head.as_ref().and_then(|h| h.target());
+
+        if head_oid == Some(commit.id()) {
+            return Ok(());
+        }
+
+        self.repo
+            .reset(&commit.into_object(), ResetType::Hard, None)
+            .map_err(SaveError::Repository)?;
         Ok(())
     }
 
