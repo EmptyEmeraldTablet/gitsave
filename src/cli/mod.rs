@@ -48,7 +48,7 @@ pub enum Commands {
     #[command(about = "Manage routes (branches)")]
     Route {
         #[command(subcommand)]
-        command: RouteCommands,
+        command: Option<RouteCommands>,
     },
 
     #[command(about = "Show current status")]
@@ -68,7 +68,10 @@ pub enum Commands {
 
     #[command(about = "Create a tag")]
     Tag {
-        name: String,
+        #[arg(short, long)]
+        list: bool,
+
+        name: Option<String>,
         message: Option<String>,
     },
 
@@ -94,7 +97,12 @@ pub enum RouteCommands {
     Create { name: String },
 
     #[command(about = "Switch to a route")]
-    Switch { name: String },
+    Switch {
+        name: String,
+
+        #[arg(short, long)]
+        create: bool,
+    },
 
     #[command(about = "Delete a route")]
     Delete { name: String },

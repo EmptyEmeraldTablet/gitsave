@@ -51,6 +51,14 @@ impl SaveManager {
     pub fn compare(&self, save1: &str, save2: &str) -> Result<CompareResult> {
         self.core.compare_saves(save1, save2)
     }
+
+    pub fn list_tags(&self) -> Result<Vec<String>> {
+        self.core.list_tags()
+    }
+
+    pub fn create_tag(&self, name: &str, message: &str) -> Result<()> {
+        self.core.create_tag(name, message)
+    }
 }
 
 pub struct RouteManager {
@@ -76,6 +84,10 @@ impl RouteManager {
 
     pub fn switch_route(&mut self, name: &str) -> Result<()> {
         self.core.switch_route(name)
+    }
+
+    pub fn switch_create_route(&mut self, name: &str) -> Result<()> {
+        self.core.switch_create_route(name)
     }
 
     pub fn delete_route(&mut self, name: &str) -> Result<()> {

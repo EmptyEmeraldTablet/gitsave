@@ -220,6 +220,34 @@ impl Git2Core {
         Ok(())
     }
 
+    pub fn switch_create_route(&mut self, name: &str) -> Result<()> {
+        self.create_route(name)?;
+        self.switch_route(name)?;
+        Ok(())
+    }
+
+    pub fn list_tags(&self) -> Result<Vec<String>> {
+        let mut tags = Vec::new();
+        let tag_names = self.repo.tag_names(None)?;
+        for name in tag_names.iter() {
+            if let Some(tag_name) = name {
+                tags.push(tag_name.to_string());
+            }
+        }
+        Ok(tags)
+    }
+
+    pub fn create_tag(&self, name: &str, message: &str) -> Result<()> {
+        let head = self.repo.head().map_err(SaveError::Repository)?;
+        let commit = head.peel_to_commit().map_err(SaveError::Repository)?;
+        let sig = self.repo.signature().map_err(SaveError::Repository)?;
+
+        self.repo
+            .tag(name, &commit.into_object(), &sig, message, false)
+            .map_err(SaveError::Repository)?;
+        Ok(())
+    }
+
     pub fn delete_route(&mut self, name: &str) -> Result<()> {
         let mut branch = self
             .repo

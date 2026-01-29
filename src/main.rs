@@ -32,8 +32,9 @@ enabled = false
     let config_path = save_dir.join("gitsave.toml");
     std::fs::write(config_path, config_content).context("Failed to write config")?;
 
-    println!("Initialized gitsave repository at {}", save_dir.display());
-    println!("Repository path: {}", repo.path().display());
+    println!("[OK] Initialized gitsave repository");
+    println!("  Location: {}", save_dir.display());
+    println!("  Git path: {}", repo.path().display());
     Ok(())
 }
 
@@ -42,7 +43,7 @@ fn handle_save(save_dir: &Path, message: &str) -> Result<()> {
     let mut manager = SaveManager::new(core);
 
     let result = manager.save(message).context("Failed to save")?;
-    println!("Save successful!");
+    println!("[OK] Save successful!");
     println!("  ID: {}", result.short_oid);
     println!("  Message: {}", result.message);
     println!("  Files changed: {}", result.changed_files);
@@ -87,17 +88,18 @@ fn handle_status(save_dir: &Path) -> Result<()> {
     let manager = SaveManager::new(core);
     let status = manager.get_status().context("Failed to get status")?;
 
-    println!("Current route: {}", status.current_route);
+    println!("Status:");
+    println!("  Current route: {}", status.current_route);
 
     if let Some(last) = &status.last_save {
-        println!("Last save: {} - {}", last.short_id, last.message);
+        println!("  Last save: {} - {}", last.short_id, last.message);
     } else {
-        println!("No saves yet");
+        println!("  No saves yet");
     }
 
     if status.has_uncommitted_changes {
         println!(
-            "Uncommitted changes: {} files",
+            "  Uncommitted changes: {} files",
             status.pending_changes.len()
         );
         for change in &status.pending_changes {
@@ -106,10 +108,10 @@ fn handle_status(save_dir: &Path) -> Result<()> {
                 core::ChangeStatus::Modified => "~",
                 core::ChangeStatus::Deleted => "-",
             };
-            println!("  {} {}", status_char, change.path);
+            println!("    {} {}", status_char, change.path);
         }
     } else {
-        println!("No uncommitted changes");
+        println!("  No uncommitted changes");
     }
     Ok(())
 }
@@ -130,13 +132,14 @@ fn handle_history(save_dir: &Path, verbose: bool, _route: &Option<String>) -> Re
     Ok(())
 }
 
-fn handle_route(save_dir: &Path, command: &RouteCommands) -> Result<()> {
+fn handle_route(save_dir: &Path, command: &Option<RouteCommands>) -> Result<()> {
     let core = Git2Core::open(save_dir).context("Failed to open repository")?;
     let mut manager = RouteManager::new(core);
 
     match command {
-        RouteCommands::List => {
+        Some(RouteCommands::List) => {
             let routes = manager.list_routes().context("Failed to list routes")?;
+            println!("Routes:");
             for route in routes {
                 let current = if route.is_current { " (current)" } else { "" };
                 let last = route
@@ -144,25 +147,38 @@ fn handle_route(save_dir: &Path, command: &RouteCommands) -> Result<()> {
                     .as_ref()
                     .map(|s| format!(" - {}", s.message))
                     .unwrap_or_else(|| String::from(""));
-                println!("{}{}{}", route.name, current, last);
+                println!("  {}{}{}", route.name, current, last);
             }
         }
-        RouteCommands::Create { name } => {
+        Some(RouteCommands::Create { name }) => {
             manager
                 .create_route(name)
                 .context("Failed to create route")?;
-            println!("Created route: {}", name);
+            println!("[OK] Created route: {}", name);
         }
-        RouteCommands::Switch { name } => {
+        Some(RouteCommands::Switch { name, create }) => {
             let mut core = manager.into_core();
-            core.switch_route(name).context("Failed to switch route")?;
-            println!("Switched to route: {}", name);
+            if *create {
+                core.switch_create_route(name)
+                    .context("Failed to create and switch route")?;
+                println!("[OK] Created and switched to route: {}", name);
+            } else {
+                core.switch_route(name).context("Failed to switch route")?;
+                println!("[OK] Switched to route: {}", name);
+            }
         }
-        RouteCommands::Delete { name } => {
+        Some(RouteCommands::Delete { name }) => {
             manager
                 .delete_route(name)
                 .context("Failed to delete route")?;
-            println!("Deleted route: {}", name);
+            println!("[OK] Deleted route: {}", name);
+        }
+        None => {
+            let current_route = manager
+                .get_current_route()
+                .context("Failed to get current route")?;
+            println!("Current route: {}", current_route);
+            println!("  Use 'gitsave route --list' to see all routes");
         }
     }
     Ok(())
@@ -242,21 +258,59 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Tag { name, message } => match Git2Core::open(&save_dir) {
-            Ok(mut core) => {
-                let mut manager = SaveManager::new(core);
-                let msg = message.clone().unwrap_or_else(|| name.clone());
-                if let Err(e) = manager.save(&msg) {
-                    eprintln!("Error: Failed to save: {}", e);
-                    std::process::exit(1);
+        Commands::Tag {
+            list,
+            name,
+            message,
+        } => {
+            if *list {
+                match Git2Core::open(&save_dir) {
+                    Ok(core) => {
+                        let manager = SaveManager::new(core);
+                        match manager.list_tags() {
+                            Ok(tags) => {
+                                if tags.is_empty() {
+                                    println!("No tags found");
+                                } else {
+                                    println!("Tags:");
+                                    for tag_name in tags {
+                                        println!("  {}", tag_name);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Error: Failed to list tags: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error: Failed to open repository: {}", e);
+                        std::process::exit(1);
+                    }
                 }
-                println!("Created tag: {}", name);
+            } else if let Some(tag_name) = name {
+                match Git2Core::open(&save_dir) {
+                    Ok(core) => {
+                        let manager = SaveManager::new(core);
+                        let msg = message.clone().unwrap_or_else(|| tag_name.clone());
+                        if let Err(e) = manager.create_tag(&tag_name, &msg) {
+                            eprintln!("Error: Failed to create tag: {}", e);
+                            std::process::exit(1);
+                        }
+                        println!("Created tag: {}", tag_name);
+                    }
+                    Err(e) => {
+                        eprintln!("Error: Failed to open repository: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                println!(
+                    "Use 'gitsave tag --list' to list tags or 'gitsave tag <name>' to create one"
+                );
             }
-            Err(e) => {
-                eprintln!("Error: Failed to open repository: {}", e);
-                std::process::exit(1);
-            }
-        },
+        }
         Commands::Export { path } => {
             if let Err(e) = std::fs::copy(&save_dir, path) {
                 eprintln!("Error: Failed to export: {}", e);
