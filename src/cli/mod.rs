@@ -81,7 +81,7 @@ pub enum Commands {
     #[command(about = "Import save repository")]
     Import { path: PathBuf },
 
-    #[command(about = "Show configuration")]
+    #[command(about = "Show or set configuration")]
     Config {
         #[arg(short, long)]
         set: Option<String>,

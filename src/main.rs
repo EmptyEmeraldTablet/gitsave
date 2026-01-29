@@ -6,6 +6,7 @@ mod manager;
 
 use anyhow::{Context, Result};
 use cli::{parse_args, Cli, Commands, RouteCommands};
+use error::SaveError;
 use git::Git2Core;
 use manager::{RouteManager, SaveManager};
 use std::path::{Path, PathBuf};
@@ -63,9 +64,13 @@ fn handle_load(
     if list {
         let saves = manager.list_saves().context("Failed to list saves")?;
         println!("Available saves:");
-        for save in saves {
-            let current = if save.is_current { " (current)" } else { "" };
-            println!("  {} - {}{}", save.short_id, save.message, current);
+        if saves.is_empty() {
+            println!("  (no saves yet)");
+        } else {
+            for save in saves {
+                let current = if save.is_current { " (current)" } else { "" };
+                println!("  {} - {}{}", save.short_id, save.message, current);
+            }
         }
         return Ok(());
     }
@@ -76,9 +81,24 @@ fn handle_load(
             return Ok(());
         }
 
-        let mut core = manager.into_core();
-        core.checkout(id).context("Failed to checkout")?;
-        println!("Loaded save: {}", id);
+        match manager.into_core().checkout(id) {
+            Ok(()) => println!("Loaded save: {}", id),
+            Err(SaveError::SaveNotFound(target)) => {
+                let all_saves = SaveManager::new(Git2Core::open(save_dir)?).list_saves()?;
+                eprintln!("[ERROR] Save not found: {}", target);
+                if !all_saves.is_empty() {
+                    eprintln!("\nAvailable saves:");
+                    for save in all_saves {
+                        eprintln!("  {} - {}", save.short_id, save.message);
+                    }
+                    eprintln!("\nUse 'gitsave load --list' to see all saves");
+                } else {
+                    eprintln!("No saves available. Use 'gitsave save <message>' to create one.");
+                }
+                std::process::exit(1);
+            }
+            Err(e) => return Err(e).context("Failed to checkout"),
+        }
     }
     Ok(())
 }
@@ -159,19 +179,82 @@ fn handle_route(save_dir: &Path, command: &Option<RouteCommands>) -> Result<()> 
         Some(RouteCommands::Switch { name, create }) => {
             let mut core = manager.into_core();
             if *create {
-                core.switch_create_route(name)
-                    .context("Failed to create and switch route")?;
-                println!("[OK] Created and switched to route: {}", name);
+                match core.switch_create_route(name) {
+                    Ok(()) => println!("[OK] Created and switched to route: {}", name),
+                    Err(SaveError::Repository(_)) => {
+                        core.create_route(name).context("Failed to create route")?;
+                        core.switch_route(name).context("Failed to switch route")?;
+                        println!("[OK] Created and switched to route: {}", name);
+                    }
+                    Err(e) => return Err(e).context("Failed to create and switch route"),
+                }
             } else {
-                core.switch_route(name).context("Failed to switch route")?;
-                println!("[OK] Switched to route: {}", name);
+                match core.switch_route(name) {
+                    Ok(()) => println!("[OK] Switched to route: {}", name),
+                    Err(SaveError::Repository(_)) => {
+                        let all_routes =
+                            RouteManager::new(Git2Core::open(save_dir)?).list_routes()?;
+                        eprintln!("[ERROR] Route not found: {}", name);
+                        if !all_routes.is_empty() {
+                            eprintln!("\nAvailable routes:");
+                            for route in all_routes {
+                                let current = if route.is_current { " (current)" } else { "" };
+                                eprintln!("  {}{}", route.name, current);
+                            }
+                            eprintln!("\nUse 'gitsave route --list' to see all routes");
+                        } else {
+                            eprintln!("No routes available. Use 'gitsave route create <name>' to create one.");
+                        }
+                        std::process::exit(1);
+                    }
+                    Err(e) => return Err(e).context("Failed to switch route"),
+                }
             }
         }
         Some(RouteCommands::Delete { name }) => {
-            manager
-                .delete_route(name)
-                .context("Failed to delete route")?;
-            println!("[OK] Deleted route: {}", name);
+            let all_routes = manager.list_routes().context("Failed to list routes")?;
+            let route_exists = all_routes.iter().any(|r| r.name == *name);
+
+            if !route_exists {
+                eprintln!("[ERROR] Route not found: {}", name);
+                if !all_routes.is_empty() {
+                    eprintln!("\nAvailable routes:");
+                    for route in all_routes {
+                        let current = if route.is_current { " (current)" } else { "" };
+                        eprintln!("  {}{}", route.name, current);
+                    }
+                }
+                eprintln!("\nUse 'gitsave route --list' to see all routes");
+                std::process::exit(1);
+            }
+
+            let is_current = all_routes
+                .iter()
+                .find(|r| r.name == *name)
+                .map(|r| r.is_current)
+                .unwrap_or(false);
+
+            if is_current {
+                eprintln!("[ERROR] Cannot delete current route '{}'", name);
+                eprintln!("Switch to another route first with 'gitsave route switch <name>'");
+                std::process::exit(1);
+            }
+
+            eprint!("[CONFIRM] Delete route '{}'? [y/N]: ", name);
+            let mut input = String::new();
+            let _ = std::io::stdin().read_line(&mut input);
+            if input.trim().to_lowercase() != "y" {
+                println!("Cancelled.");
+                return Ok(());
+            }
+
+            match manager.delete_route(name) {
+                Ok(()) => println!("[OK] Deleted route: {}", name),
+                Err(e) => {
+                    eprintln!("[ERROR] Failed to delete route: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         None => {
             let current_route = manager
@@ -324,8 +407,89 @@ fn main() {
             }
             println!("Imported from: {}", path.display());
         }
-        Commands::Config { set: _ } => {
-            println!("Config management not yet implemented");
+        Commands::Config { set } => {
+            if let Some(key_value) = set {
+                let parts: Vec<&str> = key_value.split('=').collect();
+                if parts.len() != 2 {
+                    eprintln!("[ERROR] Invalid format. Use 'key=value'");
+                    eprintln!("Example: gitsave config set save.max_history=100");
+                    std::process::exit(1);
+                }
+                let key = parts[0];
+                let value = parts[1];
+
+                let config_path = save_dir.join("gitsave.toml");
+                let config = if config_path.exists() {
+                    std::fs::read_to_string(&config_path)
+                        .map_err(|e| SaveError::Config(e.to_string()))
+                        .and_then(|s| {
+                            toml::from_str(&s).map_err(|e| SaveError::Config(e.to_string()))
+                        })
+                        .unwrap_or_else(|_| toml::Value::Table(toml::Table::new()))
+                } else {
+                    toml::Value::Table(toml::Table::new())
+                };
+
+                let new_value: toml::Value = if value.parse::<i64>().is_ok() {
+                    toml::Value::Integer(value.parse().unwrap())
+                } else if value.to_lowercase() == "true" || value.to_lowercase() == "false" {
+                    toml::Value::Boolean(value.parse().unwrap())
+                } else {
+                    toml::Value::String(value.to_string())
+                };
+
+                let mut table = match config {
+                    toml::Value::Table(t) => t,
+                    _ => toml::Table::new(),
+                };
+
+                let (section, key) = if let Some((s, k)) = key.split_once('.') {
+                    (s, k)
+                } else {
+                    ("save", key)
+                };
+
+                if !table.contains_key(section) {
+                    table.insert(section.to_string(), toml::Value::Table(toml::Table::new()));
+                }
+
+                if let Some(toml::Value::Table(section_table)) = table.get_mut(section) {
+                    section_table.insert(key.to_string(), new_value);
+                }
+
+                match toml::to_string_pretty(&toml::Value::Table(table)) {
+                    Ok(content) => {
+                        if let Err(e) = std::fs::write(&config_path, &content) {
+                            eprintln!("[ERROR] Failed to write config: {}", e);
+                            std::process::exit(1);
+                        }
+                        println!("[OK] Config updated: {} = {}", key, value);
+                    }
+                    Err(e) => {
+                        eprintln!("[ERROR] Failed to serialize config: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                let config_path = save_dir.join("gitsave.toml");
+                if !config_path.exists() {
+                    println!("No config file found. Using defaults.");
+                    println!("  save.max_history = 50");
+                    println!("  save.compression = 6");
+                    println!("  auto_save.enabled = false");
+                } else {
+                    match std::fs::read_to_string(&config_path) {
+                        Ok(content) => {
+                            println!("Configuration:");
+                            println!("{}", content);
+                        }
+                        Err(e) => {
+                            eprintln!("[ERROR] Failed to read config: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
         }
     }
 }
