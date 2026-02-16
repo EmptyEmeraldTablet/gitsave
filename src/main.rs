@@ -5,7 +5,7 @@ mod git;
 mod manager;
 
 use anyhow::{Context, Result};
-use cli::{parse_args, Cli, Commands, RouteCommands};
+use cli::{Cli, Commands, RouteCommands, parse_args};
 use error::SaveError;
 use git::Git2Core;
 use manager::{ConfigManager, RouteManager, SaveManager};
@@ -306,7 +306,9 @@ fn handle_route(save_dir: &Path, command: &Option<RouteCommands>) -> Result<()> 
                             }
                             eprintln!("\nUse 'gitsave route --list' to see all routes");
                         } else {
-                            eprintln!("No routes available. Use 'gitsave route create <name>' to create one.");
+                            eprintln!(
+                                "No routes available. Use 'gitsave route create <name>' to create one."
+                            );
                         }
                         std::process::exit(1);
                     }
