@@ -750,7 +750,7 @@ Auto-save configuration:
 gitsave tui
 ```
 
-> 目前 TUI 主要用于查看状态，不会自动触发 save/load 操作；未来会逐步集成 autosave 调度与更多快捷键。
+
 
 **当前能力亮点：**
 - 当 autosave 配置启用时，TUI 每秒轮询 `gitsave autosave` 配置并自动执行保存，保存结果通过底部通知面板提示。
