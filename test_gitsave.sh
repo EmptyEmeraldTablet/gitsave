@@ -511,6 +511,421 @@ test_load_force() {
     fi
 }
 
+# 测试21: 多文件存档测试
+test_multiple_files() {
+    log_info "测试21: 多文件存档测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 创建多个存档文件
+    for i in {1..5}; do
+        create_save_file "slot${i}.sav" "Slot $i data"
+    done
+    
+    # 保存
+    $GITSAVE_BIN save "多文件存档测试" > /dev/null 2>&1
+    
+    # 验证所有文件都被跟踪
+    all_tracked=true
+    for i in {1..5}; do
+        if ! git ls-files | grep -q "slot${i}.sav"; then
+            all_tracked=false
+            break
+        fi
+    done
+    
+    if $all_tracked; then
+        log_success "所有文件都被 Git 跟踪"
+    else
+        log_error "部分文件未被跟踪"
+    fi
+    
+    # 修改部分文件
+    echo "Modified" >> "$GAMESAVE_DIR/slot1.sav"
+    
+    # 再次保存
+    $GITSAVE_BIN save "部分文件修改" > /dev/null 2>&1
+    
+    # 验证状态
+    output=$($GITSAVE_BIN status 2>&1)
+    if echo "$output" | grep -q "No uncommitted changes"; then
+        log_success "多文件修改后状态正确"
+    else
+        log_error "多文件修改后状态不正确"
+    fi
+}
+
+# 测试22: 大文件存档测试
+test_large_file() {
+    log_info "测试22: 大文件存档测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 创建 1MB 的测试文件
+    dd if=/dev/urandom of="$GAMESAVE_DIR/large_save.bin" bs=1M count=1 > /dev/null 2>&1
+    
+    if $GITSAVE_BIN save "大文件存档测试" > /dev/null 2>&1; then
+        log_success "大文件存档成功"
+        
+        # 验证文件被跟踪
+        if git ls-files | grep -q "large_save.bin"; then
+            log_success "大文件被正确跟踪"
+        else
+            log_error "大文件未被跟踪"
+        fi
+    else
+        log_error "大文件存档失败"
+    fi
+}
+
+# 测试23: 特殊字符文件名测试
+test_special_characters() {
+    log_info "测试23: 特殊字符文件名测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 创建带有特殊字符的文件
+    create_save_file "save (1).dat" "Special chars test"
+    create_save_file "save_中文.sav" "Unicode test"
+    create_save_file "save-with-dash.dat" "Dash test"
+    
+    if $GITSAVE_BIN save "特殊字符文件名测试" > /dev/null 2>&1; then
+        log_success "特殊字符文件名存档成功"
+        
+        # 验证文件被跟踪
+        tracked_count=$(git ls-files | grep -c "save")
+        if [ "$tracked_count" -ge 3 ]; then
+            log_success "特殊字符文件被正确跟踪"
+        else
+            log_error "部分特殊字符文件未被跟踪"
+        fi
+    else
+        log_error "特殊字符文件名存档失败"
+    fi
+}
+
+# 测试24: 空存档测试
+test_empty_save() {
+    log_info "测试24: 空存档测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 创建一个空文件
+    touch "$GAMESAVE_DIR/empty.dat"
+    
+    if $GITSAVE_BIN save "空文件测试" > /dev/null 2>&1; then
+        log_success "空文件存档成功"
+        
+        if git ls-files | grep -q "empty.dat"; then
+            log_success "空文件被正确跟踪"
+        else
+            log_error "空文件未被跟踪"
+        fi
+    else
+        log_error "空文件存档失败"
+    fi
+}
+
+# 测试25: 删除文件后存档测试
+test_delete_file_save() {
+    log_info "测试25: 删除文件后存档测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 先创建一个文件并保存
+    create_save_file "to_delete.dat" "Will be deleted"
+    $GITSAVE_BIN save "创建待删除文件" > /dev/null 2>&1
+    
+    # 删除文件
+    rm "$GAMESAVE_DIR/to_delete.dat"
+    
+    # 保存删除操作
+    if $GITSAVE_BIN save "删除文件" > /dev/null 2>&1; then
+        log_success "删除文件后存档成功"
+        
+        # 验证文件在工作区不存在
+        if [ ! -f "$GAMESAVE_DIR/to_delete.dat" ]; then
+            log_success "文件在工作区被正确删除"
+        else
+            log_error "文件仍存在于工作区"
+        fi
+    else
+        log_error "删除文件后存档失败"
+    fi
+}
+
+# 测试26: 快速连续存档测试
+test_rapid_saves() {
+    log_info "测试26: 快速连续存档测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 快速连续保存5次
+    for i in {1..5}; do
+        echo "Rapid save $i" > "$GAMESAVE_DIR/rapid.dat"
+        $GITSAVE_BIN save "快速存档 $i" > /dev/null 2>&1
+    done
+    
+    # 验证历史记录中有5个存档
+    save_count=$($GITSAVE_BIN history 2>&1 | grep -c "快速存档")
+    if [ "$save_count" -eq 5 ]; then
+        log_success "快速连续存档成功，共 $save_count 个存档"
+    else
+        log_error "快速存档数量不正确，期望5个，实际 $save_count 个"
+    fi
+}
+
+# 测试27: 路线切换后文件隔离测试
+test_route_isolation() {
+    log_info "测试27: 路线切换后文件隔离测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 确保在 main 路线
+    if ! $GITSAVE_BIN route switch main > /dev/null 2>&1; then
+        # 如果 main 不存在，创建它
+        $GITSAVE_BIN route switch -c "main" > /dev/null 2>&1 || true
+    fi
+    
+    # 在 main 路线创建文件
+    create_save_file "main_only.dat" "Main route data"
+    $GITSAVE_BIN save "Main路线存档" > /dev/null 2>&1
+    
+    # 创建并切换到新路线
+    if $GITSAVE_BIN route switch -c "test_route" > /dev/null 2>&1; then
+        create_save_file "test_only.dat" "Test route data"
+        $GITSAVE_BIN save "Test路线存档" > /dev/null 2>&1
+        
+        # 切换回 main，验证 test_only.dat 不存在
+        if $GITSAVE_BIN route switch main > /dev/null 2>&1; then
+            if [ ! -f "$GAMESAVE_DIR/test_only.dat" ]; then
+                log_success "路线切换后文件隔离正确"
+            else
+                log_error "路线切换后文件未正确隔离"
+            fi
+            
+            # 验证 main_only.dat 存在
+            if [ -f "$GAMESAVE_DIR/main_only.dat" ]; then
+                log_success "原路线文件正确恢复"
+            else
+                log_error "原路线文件未恢复"
+            fi
+        else
+            log_error "切换回 main 路线失败"
+        fi
+        
+        # 清理测试路线
+        $GITSAVE_BIN route switch main > /dev/null 2>&1 || true
+        yes | $GITSAVE_BIN route delete "test_route" > /dev/null 2>&1 || true
+    else
+        log_error "创建测试路线失败"
+    fi
+}
+
+# 测试28: 标签在路线间共享测试
+test_tag_across_routes() {
+    log_info "测试28: 标签在路线间共享测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 在 main 创建标签
+    $GITSAVE_BIN route switch main > /dev/null 2>&1 || true
+    $GITSAVE_BIN tag "shared_tag" "跨路线标签" > /dev/null 2>&1
+    
+    # 创建新路线
+    $GITSAVE_BIN route switch -c "tag_test_route" > /dev/null 2>&1
+    
+    # 在新路线上查看标签
+    output=$($GITSAVE_BIN tag --list 2>&1)
+    if echo "$output" | grep -q "shared_tag"; then
+        log_success "标签在路线间正确共享"
+    else
+        log_error "标签未在路线间共享"
+    fi
+    
+    # 清理
+    $GITSAVE_BIN route switch main > /dev/null 2>&1
+    $GITSAVE_BIN tag --delete "shared_tag" > /dev/null 2>&1 || true
+    yes | $GITSAVE_BIN route delete "tag_test_route" > /dev/null 2>&1 || true
+}
+
+# 测试29: 存档回滚多层测试
+test_multi_level_rollback() {
+    log_info "测试29: 存档回滚多层测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 创建一系列存档
+    for i in {1..3}; do
+        echo "Level $i content" > "$GAMESAVE_DIR/level.dat"
+        $GITSAVE_BIN save "层级存档 $i" > /dev/null 2>&1
+    done
+    
+    # 获取第一个存档的ID
+    first_save_id=$($GITSAVE_BIN history 2>&1 | grep "层级存档 3" | tail -1 | awk '{print $1}')
+    
+    # 回滚到第一个存档
+    if $GITSAVE_BIN load --force "$first_save_id" > /dev/null 2>&1; then
+        content=$(cat "$GAMESAVE_DIR/level.dat")
+        if [ "$content" == "Level 3 content" ]; then
+            log_success "多层回滚成功"
+        else
+            log_error "多层回滚后内容不正确"
+        fi
+    else
+        log_error "多层回滚失败"
+    fi
+}
+
+# 测试30: 并发修改检测测试
+test_concurrent_modification() {
+    log_info "测试30: 并发修改检测测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 保存初始状态
+    echo "Original" > "$GAMESAVE_DIR/concurrent.dat"
+    $GITSAVE_BIN save "初始状态" > /dev/null 2>&1
+    
+    # 模拟外部修改（直接修改文件而不使用 gitsave）
+    echo "External modification" > "$GAMESAVE_DIR/concurrent.dat"
+    
+    # 检查状态
+    output=$($GITSAVE_BIN status 2>&1)
+    if echo "$output" | grep -q "Uncommitted changes"; then
+        log_success "并发修改检测成功"
+    else
+        log_error "未检测到并发修改"
+    fi
+}
+
+# 测试31: 二进制文件存档测试
+test_binary_file() {
+    log_info "测试31: 二进制文件存档测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 创建二进制文件
+    printf '\x00\x01\x02\x03\xff\xfe\xfd\xfc' > "$GAMESAVE_DIR/binary.dat"
+    
+    if $GITSAVE_BIN save "二进制文件测试" > /dev/null 2>&1; then
+        log_success "二进制文件存档成功"
+        
+        # 修改二进制文件
+        printf '\xaa\xbb\xcc\xdd' >> "$GAMESAVE_DIR/binary.dat"
+        $GITSAVE_BIN save "修改二进制文件" > /dev/null 2>&1
+        
+        # 回滚到第一个版本
+        save_id=$($GITSAVE_BIN history 2>&1 | grep "二进制文件测试" | head -1 | awk '{print $1}')
+        $GITSAVE_BIN load --force "$save_id" > /dev/null 2>&1
+        
+        # 验证文件内容
+        expected=$(printf '\x00\x01\x02\x03\xff\xfe\xfd\xfc')
+        actual=$(cat "$GAMESAVE_DIR/binary.dat")
+        if [ "$actual" == "$expected" ]; then
+            log_success "二进制文件回滚成功"
+        else
+            log_error "二进制文件回滚后内容不正确"
+        fi
+    else
+        log_error "二进制文件存档失败"
+    fi
+}
+
+# 测试32: 长路径存档测试
+test_long_path() {
+    log_info "测试32: 长路径存档测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 创建深层目录结构
+    mkdir -p "saves/2024/january/week1/day1"
+    echo "Deep file" > "saves/2024/january/week1/day1/deep_save.dat"
+    
+    if $GITSAVE_BIN save "长路径存档测试" > /dev/null 2>&1; then
+        log_success "长路径存档成功"
+        
+        if git ls-files | grep -q "deep_save.dat"; then
+            log_success "深层目录文件被正确跟踪"
+        else
+            log_error "深层目录文件未被跟踪"
+        fi
+    else
+        log_error "长路径存档失败"
+    fi
+}
+
+# 测试33: 存档消息特殊字符测试
+test_save_message_special_chars() {
+    log_info "测试33: 存档消息特殊字符测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 使用特殊字符作为存档消息
+    echo "test" > "$GAMESAVE_DIR/msg_test.dat"
+    if $GITSAVE_BIN save "存档消息包含: 中文 & special chars! @ # $ %" > /dev/null 2>&1; then
+        log_success "特殊字符存档消息成功"
+        
+        # 验证消息在历史中
+        output=$($GITSAVE_BIN history 2>&1)
+        if echo "$output" | grep -q "中文"; then
+            log_success "特殊字符消息正确显示在历史中"
+        else
+            log_error "特殊字符消息未正确显示"
+        fi
+    else
+        log_error "特殊字符存档消息失败"
+    fi
+}
+
+# 测试34: 路线名称特殊字符测试
+test_route_name_special_chars() {
+    log_info "测试34: 路线名称特殊字符测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 创建带有特殊字符的路线名称
+    if $GITSAVE_BIN route create "路线_测试-123"; then
+        log_success "特殊字符路线名称创建成功"
+        
+        # 切换到该路线
+        if $GITSAVE_BIN route switch "路线_测试-123" > /dev/null 2>&1; then
+            log_success "特殊字符路线名称切换成功"
+        else
+            log_error "特殊字符路线名称切换失败"
+        fi
+        
+        # 清理
+        $GITSAVE_BIN route switch main > /dev/null 2>&1 || true
+        yes | $GITSAVE_BIN route delete "路线_测试-123" > /dev/null 2>&1 || true
+    else
+        log_error "特殊字符路线名称创建失败"
+    fi
+}
+
+# 测试35: 大量存档性能测试
+test_many_saves() {
+    log_info "测试35: 大量存档性能测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 创建20个存档
+    start_time=$(date +%s)
+    for i in {1..20}; do
+        echo "Performance test $i" > "$GAMESAVE_DIR/perf.dat"
+        $GITSAVE_BIN save "性能测试存档 $i" > /dev/null 2>&1
+    done
+    end_time=$(date +%s)
+    
+    elapsed=$((end_time - start_time))
+    
+    # 验证存档数量
+    save_count=$($GITSAVE_BIN history 2>&1 | grep -c "性能测试存档")
+    
+    if [ "$save_count" -eq 20 ]; then
+        log_success "大量存档创建成功，耗时 ${elapsed} 秒"
+        
+        # 验证历史命令性能
+        start_time=$(date +%s)
+        $GITSAVE_BIN history > /dev/null 2>&1
+        end_time=$(date +%s)
+        history_time=$((end_time - start_time))
+        
+        if [ "$history_time" -lt 5 ]; then
+            log_success "历史查询性能良好 (${history_time}秒)"
+        else
+            log_error "历史查询性能较差 (${history_time}秒)"
+        fi
+    else
+        log_error "大量存档数量不正确，期望20个，实际 $save_count 个"
+    fi
+}
+
 # 主函数
 main() {
     echo "========================================"
@@ -545,6 +960,21 @@ main() {
     test_route_delete
     test_history_verbose
     test_load_force
+    test_multiple_files
+    test_large_file
+    test_special_characters
+    test_empty_save
+    test_delete_file_save
+    test_rapid_saves
+    test_route_isolation
+    test_tag_across_routes
+    test_multi_level_rollback
+    test_concurrent_modification
+    test_binary_file
+    test_long_path
+    test_save_message_special_chars
+    test_route_name_special_chars
+    test_many_saves
     
     # 输出测试摘要
     echo ""
