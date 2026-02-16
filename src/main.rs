@@ -11,6 +11,7 @@ use cli::{Cli, Commands, RouteCommands, parse_args};
 use error::SaveError;
 use git::Git2Core;
 use manager::{ConfigManager, RouteManager, SaveManager};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 fn get_save_dir(cli: &Cli) -> PathBuf {
@@ -181,9 +182,16 @@ fn handle_load(
 
         // 检查是否有未提交的更改
         let status = manager.get_status()?;
-        if status.has_uncommitted_changes && !_force {
-            eprintln!("[ERROR] Uncommitted changes. Save first or use --force");
-            std::process::exit(1);
+        if status.has_uncommitted_changes {
+            if !_force {
+                eprintln!("[ERROR] Uncommitted changes. Save first or use --force");
+                std::process::exit(1);
+            } else if !confirm_discard_changes(
+                "Uncommitted changes detected. Loading will discard them. Proceed?",
+            )? {
+                println!("Cancelled.");
+                return Ok(());
+            }
         }
 
         match manager.into_core().checkout(id) {
@@ -270,12 +278,20 @@ fn handle_route(save_dir: &Path, list_flag: bool, command: &Option<RouteCommands
             return print_routes(&manager);
         }
         Some(RouteCommands::Create { name }) => {
+            if !ensure_clean_or_confirm(save_dir, "Creating a new route")? {
+                println!("Cancelled.");
+                return Ok(());
+            }
             manager
                 .create_route(name)
                 .context("Failed to create route")?;
             println!("[OK] Created route: {}", name);
         }
         Some(RouteCommands::Switch { name, create }) => {
+            if !ensure_clean_or_confirm(save_dir, "Switching routes")? {
+                println!("Cancelled.");
+                return Ok(());
+            }
             let mut core = manager.into_core();
             if *create {
                 match core.switch_create_route(name) {
@@ -400,6 +416,29 @@ fn handle_route(save_dir: &Path, list_flag: bool, command: &Option<RouteCommands
         }
     }
     Ok(())
+}
+
+fn confirm_discard_changes(message: &str) -> Result<bool> {
+    eprint!("[WARN] {} [y/N]: ", message);
+    io::stderr().flush().ok();
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read input")?;
+    let resp = input.trim().to_lowercase();
+    Ok(resp == "y" || resp == "yes")
+}
+
+fn ensure_clean_or_confirm(save_dir: &Path, action: &str) -> Result<bool> {
+    let core = Git2Core::open(save_dir)?;
+    let status = core.get_status()?;
+    if !status.has_uncommitted_changes {
+        return Ok(true);
+    }
+    confirm_discard_changes(&format!(
+        "Uncommitted changes detected. {} will discard them. Proceed?",
+        action
+    ))
 }
 
 fn print_routes(manager: &RouteManager) -> Result<()> {
