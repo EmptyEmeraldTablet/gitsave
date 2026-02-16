@@ -194,7 +194,7 @@ impl Default for IgnorePatterns {
 
 impl ConfigManager {
     pub fn new(save_dir: &Path) -> Self {
-        let config_path = save_dir.join("gitsave.toml");
+        let config_path = save_dir.join(".git").join("gitsave.toml");
         Self { config_path }
     }
 

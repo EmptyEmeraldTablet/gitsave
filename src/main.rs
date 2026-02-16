@@ -30,13 +30,8 @@ compression = 6
 [auto_save]
 enabled = false
 "#;
-    let config_path = save_dir.join("gitsave.toml");
-    std::fs::write(config_path, config_content).context("Failed to write config")?;
-
-    // 创建 .gitignore 文件，忽略 gitsave.toml
-    let gitignore_path = save_dir.join(".gitignore");
-    let gitignore_content = "# Gitsave configuration file\ngitsave.toml\n";
-    std::fs::write(gitignore_path, gitignore_content).context("Failed to write .gitignore")?;
+    let config_path = repo.path().join("gitsave.toml");
+    std::fs::write(&config_path, config_content).context("Failed to write config")?;
 
     println!("[OK] Initialized gitsave repository");
     println!("  Location: {}", save_dir.display());
@@ -582,7 +577,7 @@ fn main() {
                 let key = parts[0];
                 let value = parts[1];
 
-                let config_path = save_dir.join("gitsave.toml");
+                let config_path = save_dir.join(".git").join("gitsave.toml");
                 let config = if config_path.exists() {
                     std::fs::read_to_string(&config_path)
                         .map_err(|e| SaveError::Config(e.to_string()))
@@ -635,7 +630,7 @@ fn main() {
                     }
                 }
             } else {
-                let config_path = save_dir.join("gitsave.toml");
+                let config_path = save_dir.join(".git").join("gitsave.toml");
                 if !config_path.exists() {
                     println!("No config file found. Using defaults.");
                     println!("  save.max_history = 50");

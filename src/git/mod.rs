@@ -545,8 +545,11 @@ impl Git2Core {
     }
 
     fn get_current_route_name(&self) -> Result<String> {
-        let head = self.repo.head().map_err(SaveError::Repository)?;
-        let branch_name = head.shorthand().unwrap_or("unknown").to_string();
+        let head = match self.repo.head() {
+            Ok(h) => h,
+            Err(_) => return Ok("main".to_string()),
+        };
+        let branch_name = head.shorthand().unwrap_or("main").to_string();
         Ok(branch_name)
     }
 

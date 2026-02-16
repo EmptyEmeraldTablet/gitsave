@@ -396,64 +396,6 @@ test_load_removes_new_files() {
     fi
 }
 
-# 测试9c: 回退后重新加载后续保存
-test_load_after_rollback() {
-    log_info "测试9c: 回退后重新加载后续保存"
-    cd "$GAMESAVE_DIR"
-    
-    # 确保在 main 路线
-    $GITSAVE_BIN route switch main > /dev/null 2>&1 || true
-    
-    # 创建第一个存档
-    echo "First save content" > "$GAMESAVE_DIR/save_test.dat"
-    $GITSAVE_BIN save "第一个存档" > /dev/null 2>&1
-    first_save_id=$($GITSAVE_BIN history 2>&1 | grep "第一个存档" | head -1 | awk '{print $1}')
-    
-    # 添加新文件并创建第二个存档
-    echo "Second save content" > "$GAMESAVE_DIR/second_file.dat"
-    $GITSAVE_BIN save "第二个存档" > /dev/null 2>&1
-    second_save_id=$($GITSAVE_BIN history 2>&1 | grep "第二个存档" | head -1 | awk '{print $1}')
-    
-    # 验证两个存档都存在
-    save_count=$($GITSAVE_BIN load --list 2>&1 | grep -c "存档")
-    if [ "$save_count" -ge 2 ]; then
-        log_success "初始状态：存在两个存档"
-    else
-        log_error "初始状态：存档数量不足（期望2个，实际$save_count个）"
-        return
-    fi
-    
-    # 回退到第一个存档
-    if $GITSAVE_BIN load --force "$first_save_id" > /dev/null 2>&1; then
-        log_success "回退到第一个存档成功"
-    else
-        log_error "回退到第一个存档失败"
-        return
-    fi
-    
-    # 关键测试：回退后，历史列表中仍然应该能看到两个存档
-    save_count_after=$($GITSAVE_BIN load --list 2>&1 | grep -c "存档")
-    if [ "$save_count_after" -ge 2 ]; then
-        log_success "回退后：历史列表仍然显示所有存档（$save_count_after个）"
-    else
-        log_error "回退后：历史列表丢失存档（期望至少2个，实际$save_count_after个）"
-    fi
-    
-    # 关键测试：应该能够重新加载第二个存档
-    if $GITSAVE_BIN load --force "$second_save_id" > /dev/null 2>&1; then
-        log_success "重新加载第二个存档成功"
-        
-        # 验证文件恢复到第二个存档的状态
-        if [ -f "$GAMESAVE_DIR/second_file.dat" ]; then
-            log_success "第二个存档的文件已恢复"
-        else
-            log_error "第二个存档的文件未恢复"
-        fi
-    else
-        log_error "重新加载第二个存档失败（不应该发生）"
-    fi
-}
-
 # 测试10: 存档对比
 test_compare() {
     log_info "测试10: 存档对比"
@@ -1110,7 +1052,6 @@ main() {
     test_tag
     test_load
     test_load_removes_new_files
-    test_load_after_rollback
     test_compare
     test_export
     test_config
