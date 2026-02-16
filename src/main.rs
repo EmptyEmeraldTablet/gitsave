@@ -5,7 +5,7 @@ mod git;
 mod manager;
 
 use anyhow::{Context, Result};
-use cli::{parse_args, Cli, Commands, RouteCommands};
+use cli::{Cli, Commands, RouteCommands, parse_args};
 use error::SaveError;
 use git::Git2Core;
 use manager::{ConfigManager, RouteManager, SaveManager};
@@ -255,23 +255,17 @@ fn handle_history(save_dir: &Path, verbose: bool, _route: &Option<String>) -> Re
     Ok(())
 }
 
-fn handle_route(save_dir: &Path, command: &Option<RouteCommands>) -> Result<()> {
+fn handle_route(save_dir: &Path, list_flag: bool, command: &Option<RouteCommands>) -> Result<()> {
     let core = Git2Core::open(save_dir).context("Failed to open repository")?;
     let mut manager = RouteManager::new(core);
 
+    if list_flag && command.is_none() {
+        return print_routes(&manager);
+    }
+
     match command {
         Some(RouteCommands::List) => {
-            let routes = manager.list_routes().context("Failed to list routes")?;
-            println!("Routes:");
-            for route in routes {
-                let current = if route.is_current { " (current)" } else { "" };
-                let last = route
-                    .latest_save
-                    .as_ref()
-                    .map(|s| format!(" - {}", s.message))
-                    .unwrap_or_else(|| String::from(""));
-                println!("  {}{}{}", route.name, current, last);
-            }
+            return print_routes(&manager);
         }
         Some(RouteCommands::Create { name }) => {
             manager
@@ -306,7 +300,9 @@ fn handle_route(save_dir: &Path, command: &Option<RouteCommands>) -> Result<()> 
                             }
                             eprintln!("\nUse 'gitsave route --list' to see all routes");
                         } else {
-                            eprintln!("No routes available. Use 'gitsave route create <name>' to create one.");
+                            eprintln!(
+                                "No routes available. Use 'gitsave route create <name>' to create one."
+                            );
                         }
                         std::process::exit(1);
                     }
@@ -391,12 +387,30 @@ fn handle_route(save_dir: &Path, command: &Option<RouteCommands>) -> Result<()> 
             }
         }
         None => {
+            if list_flag {
+                return print_routes(&manager);
+            }
             let current_route = manager
                 .get_current_route()
                 .context("Failed to get current route")?;
             println!("Current route: {}", current_route);
             println!("  Use 'gitsave route --list' to see all routes");
         }
+    }
+    Ok(())
+}
+
+fn print_routes(manager: &RouteManager) -> Result<()> {
+    let routes = manager.list_routes().context("Failed to list routes")?;
+    println!("Routes:");
+    for route in routes {
+        let current = if route.is_current { " (current)" } else { "" };
+        let last = route
+            .latest_save
+            .as_ref()
+            .map(|s| format!(" - {}", s.message))
+            .unwrap_or_else(|| String::from(""));
+        println!("  {}{}{}", route.name, current, last);
     }
     Ok(())
 }
@@ -464,8 +478,8 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Commands::Route { command } => {
-            if let Err(e) = handle_route(&save_dir, command) {
+        Commands::Route { list, command } => {
+            if let Err(e) = handle_route(&save_dir, *list, command) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
