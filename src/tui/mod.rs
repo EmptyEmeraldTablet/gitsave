@@ -1,18 +1,20 @@
-use std::io::{stdout, Stdout};
+use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::{execute, ExecutableCommand};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use ratatui::Frame;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::terminal::Terminal;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
 
 use crate::core::{RouteInfo, SaveEntry, SaveStatus};
 use crate::git::Git2Core;
@@ -35,21 +37,19 @@ pub fn run(save_dir: &Path) -> Result<()> {
         terminal.draw(|f| draw_ui(f, &app))?;
 
         if event::poll(tick_rate)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') => should_quit = true,
-                        KeyCode::Char('r') => app.refresh()?,
-                        KeyCode::Tab => app.toggle_focus(),
-                        KeyCode::Down | KeyCode::Char('j') => app.move_down(),
-                        KeyCode::Up | KeyCode::Char('k') => app.move_up(),
-                        KeyCode::PageDown => app.page_down(),
-                        KeyCode::PageUp => app.page_up(),
-                        _ => {}
-                    }
-                }
-            } else if matches!(event::read()?, Event::Resize(_, _)) {
-                app.refresh()?;
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                    KeyCode::Char('q') => should_quit = true,
+                    KeyCode::Char('r') => app.refresh()?,
+                    KeyCode::Tab => app.toggle_focus(),
+                    KeyCode::Down | KeyCode::Char('j') => app.move_down(),
+                    KeyCode::Up | KeyCode::Char('k') => app.move_up(),
+                    KeyCode::PageDown => app.page_down(),
+                    KeyCode::PageUp => app.page_up(),
+                    _ => {}
+                },
+                Event::Resize(_, _) => app.refresh()?,
+                _ => {}
             }
         }
 
@@ -193,10 +193,17 @@ impl AppState {
     }
 }
 
-fn draw_ui<B: ratatui::backend::Backend>(f: &mut Frame<'_, B>, app: &AppState) {
+fn draw_ui(f: &mut Frame, app: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)].as_ref())
+        .constraints(
+            [
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(2),
+            ]
+            .as_ref(),
+        )
         .split(f.size());
 
     let header = Paragraph::new(format!(
@@ -233,7 +240,7 @@ fn draw_ui<B: ratatui::backend::Backend>(f: &mut Frame<'_, B>, app: &AppState) {
     f.render_widget(help, chunks[2]);
 }
 
-fn draw_routes_panel<B: ratatui::backend::Backend>(f: &mut Frame<'_, B>, area: Rect, app: &AppState) {
+fn draw_routes_panel(f: &mut Frame, area: Rect, app: &AppState) {
     let panel_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(5), Constraint::Length(5)].as_ref())
@@ -264,7 +271,11 @@ fn draw_routes_panel<B: ratatui::backend::Backend>(f: &mut Frame<'_, B>, area: R
     let routes_list = List::new(route_items)
         .block(routes_block)
         .highlight_symbol("> ")
-        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
 
     let mut route_state = ListState::default();
     if !app.routes.is_empty() {
@@ -275,7 +286,11 @@ fn draw_routes_panel<B: ratatui::backend::Backend>(f: &mut Frame<'_, B>, area: R
     let autosave_lines = vec![
         Line::from(format!(
             "Status : {}",
-            if app.autosave.enabled { "Enabled" } else { "Disabled" }
+            if app.autosave.enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
         )),
         Line::from(format!("Interval: {}s", app.autosave.interval)),
         Line::from(format!("Max saves: {}", app.autosave.max_count)),
@@ -291,11 +306,13 @@ fn draw_routes_panel<B: ratatui::backend::Backend>(f: &mut Frame<'_, B>, area: R
     ];
 
     let autosave_block = Block::default().borders(Borders::ALL).title("Autosave");
-    let autosave_widget = Paragraph::new(autosave_lines).block(autosave_block).wrap(Wrap { trim: true });
+    let autosave_widget = Paragraph::new(autosave_lines)
+        .block(autosave_block)
+        .wrap(Wrap { trim: true });
     f.render_widget(autosave_widget, panel_chunks[1]);
 }
 
-fn draw_history_panel<B: ratatui::backend::Backend>(f: &mut Frame<'_, B>, area: Rect, app: &AppState) {
+fn draw_history_panel(f: &mut Frame, area: Rect, app: &AppState) {
     let panel_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(10), Constraint::Length(7)].as_ref())
@@ -312,10 +329,7 @@ fn draw_history_panel<B: ratatui::backend::Backend>(f: &mut Frame<'_, B>, area: 
         app.history
             .iter()
             .map(|entry| {
-                let ts = entry
-                    .timestamp
-                    .format("%Y-%m-%d %H:%M:%S")
-                    .to_string();
+                let ts = entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
                 ListItem::new(format!("{}  {}  {}", entry.short_id, ts, entry.message))
             })
             .collect()
@@ -324,7 +338,11 @@ fn draw_history_panel<B: ratatui::backend::Backend>(f: &mut Frame<'_, B>, area: 
     let history_list = List::new(history_items)
         .block(history_block)
         .highlight_symbol(">> ")
-        .highlight_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
 
     let mut history_state = ListState::default();
     if !app.history.is_empty() {
@@ -354,7 +372,9 @@ fn status_message(app: &AppState) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Working tree:",
-        Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::LightBlue)
+            .add_modifier(Modifier::BOLD),
     )));
     if app.status.has_uncommitted_changes {
         for change in &app.status.pending_changes {

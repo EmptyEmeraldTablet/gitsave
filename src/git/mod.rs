@@ -3,6 +3,7 @@ use crate::core::{
     SaveStatus,
 };
 use crate::error::{Result, SaveError};
+use crate::state::{ForkStateManager, root_branch_name};
 use chrono::{DateTime, Utc};
 use git2::{BranchType, Commit, DiffOptions, Oid, Patch, Repository, ResetType};
 use std::collections::{HashMap, HashSet};
@@ -35,6 +36,8 @@ impl Git2Core {
     }
 
     pub fn commit(&mut self, message: &str) -> Result<SaveResult> {
+        self.ensure_branch_for_detached()?;
+
         let mut index = self.repo.index().map_err(SaveError::Repository)?;
         index
             .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
@@ -104,11 +107,61 @@ impl Git2Core {
             .checkout_tree(&tree.into_object(), Some(&mut checkout_opts))
             .map_err(SaveError::Repository)?;
 
-        // 然后重置 HEAD 到目标提交
+        // 记录当前分支，后续设置 HEAD 分离状态后将无法获取
+        let base_branch = self
+            .repo
+            .head()
+            .ok()
+            .and_then(|h| h.shorthand().map(|s| s.to_string()));
+
+        // 将 HEAD 设置为分离状态，保持原始分支不变
         self.repo
-            .reset(&commit.into_object(), ResetType::Hard, None)
+            .set_head_detached(commit.id())
             .map_err(SaveError::Repository)?;
 
+        // 记录需要派生的基础分支，以便下一次保存创建新路线
+        let fork_state = ForkStateManager::new(&self.workdir);
+        fork_state.set_pending_base(base_branch.map(|b| root_branch_name(&b)));
+
+        Ok(())
+    }
+
+    fn ensure_branch_for_detached(&mut self) -> Result<()> {
+        let fork_state = ForkStateManager::new(&self.workdir);
+        if !self.repo.head_detached().unwrap_or(false) {
+            fork_state.set_pending_base(None);
+            return Ok(());
+        }
+
+        let head = self.repo.head().map_err(SaveError::Repository)?;
+        let commit = head.peel_to_commit().map_err(SaveError::Repository)?;
+
+        let base = fork_state
+            .take_pending_base()
+            .filter(|b| !b.trim().is_empty())
+            .unwrap_or_else(|| "main".to_string());
+        let base_root = root_branch_name(&base);
+        let new_branch = fork_state.next_branch_name(&base_root);
+
+        self.repo
+            .branch(&new_branch, &commit, false)
+            .map_err(SaveError::Repository)?;
+        self.repo
+            .set_head(&format!("refs/heads/{}", new_branch))
+            .map_err(SaveError::Repository)?;
+
+        let mut checkout_opts = git2::build::CheckoutBuilder::new();
+        checkout_opts.force();
+        self.repo
+            .checkout_head(Some(&mut checkout_opts))
+            .map_err(SaveError::Repository)?;
+
+        println!(
+            "[INFO] Detached history detected. Created route '{}' from '{}'.",
+            new_branch, base_root
+        );
+
+        fork_state.set_pending_base(None);
         Ok(())
     }
 

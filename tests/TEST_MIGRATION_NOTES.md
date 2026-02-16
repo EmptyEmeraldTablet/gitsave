@@ -4,6 +4,7 @@
 - `test_cli_routes.py`: simulates the multi-step route/list scenario (save, add, rollback, new save) and verifies `gitsave route --list` output.
 - `test_save_load.py`: basic save/load validation to ensure files roll back correctly.
 - `test_route_switch.py`: confirms branch isolation when switching between main and new routes.
+- `test_auto_branching.py`: reproduces the rollback → diverging save flow, asserts auto-created `gitsave/<base>/timestamp-NNN` route naming, and protects against recursive prefixes.
 - Shared helpers in `tests/utils.py` for invoking `target/release/gitsave` from pytest.
 
 ## Next candidates

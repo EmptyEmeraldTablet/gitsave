@@ -3,6 +3,8 @@ mod core;
 mod error;
 mod git;
 mod manager;
+mod state;
+mod tui;
 
 use anyhow::{Context, Result};
 use cli::{Cli, Commands, RouteCommands, parse_args};
@@ -672,6 +674,12 @@ fn main() {
             disable,
         } => {
             handle_autosave(&save_dir, *enable, *interval, *max_count, *status, *disable);
+        }
+        Commands::Tui => {
+            if let Err(e) = tui::run(&save_dir) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 }

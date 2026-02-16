@@ -113,6 +113,9 @@ pub enum Commands {
         #[arg(short, long, action = clap::ArgAction::SetTrue)]
         disable: bool,
     },
+
+    #[command(about = "Launch the interactive TUI dashboard (experimental)")]
+    Tui,
 }
 
 #[derive(Subcommand)]
