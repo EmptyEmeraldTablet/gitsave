@@ -28,6 +28,15 @@ const MAX_NOTIFICATION_LINES: usize = 4;
 const STATUS_POLL_SECS: u64 = 3;
 
 pub fn run(save_dir: &Path) -> Result<()> {
+    // Preflight check before switching to alternate screen
+    if let Err(err) = Git2Core::open(save_dir) {
+        return Err(SaveError::Config(format!(
+            "Not a gitsave repository at {}. Run `gitsave init` first. ({})",
+            save_dir.display(),
+            err
+        )));
+    }
+
     let mut stdout = stdout();
     enable_raw_mode()?;
     stdout.execute(EnterAlternateScreen)?;
