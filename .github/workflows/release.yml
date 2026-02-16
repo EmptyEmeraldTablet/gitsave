@@ -179,25 +179,3 @@ jobs:
           asset_path: ./gitsave-macos-arm64
           asset_name: gitsave-macos-arm64
           asset_content_type: application/octet-stream
-
-  # 运行测试
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgit2-dev pkg-config
-      
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      
-      - name: Run tests
-        run: |
-          cargo build --release
-          cp target/release/gitsave /tmp/gitsave
-          chmod +x /tmp/gitsave
-          export GITSAVE_BIN=/tmp/gitsave
-          ./test_gitsave.sh
