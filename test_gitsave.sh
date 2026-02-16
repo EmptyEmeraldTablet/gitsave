@@ -348,6 +348,54 @@ test_load() {
     fi
 }
 
+# 测试9b: 回退时删除新增文件测试
+test_load_removes_new_files() {
+    log_info "测试9b: 回退时删除新增文件测试"
+    cd "$GAMESAVE_DIR"
+    
+    # 确保在 main 路线
+    $GITSAVE_BIN route switch main > /dev/null 2>&1 || true
+    
+    # 创建一个基础存档
+    echo "Base content" > "$GAMESAVE_DIR/base_file.dat"
+    $GITSAVE_BIN save "基础存档" > /dev/null 2>&1
+    base_save_id=$($GITSAVE_BIN history 2>&1 | grep "基础存档" | head -1 | awk '{print $1}')
+    
+    # 新增一个文件
+    echo "New file content" > "$GAMESAVE_DIR/new_file.dat"
+    $GITSAVE_BIN save "添加新文件" > /dev/null 2>&1
+    new_save_id=$($GITSAVE_BIN history 2>&1 | grep "添加新文件" | head -1 | awk '{print $1}')
+    
+    # 验证新文件存在
+    if [ -f "$GAMESAVE_DIR/new_file.dat" ]; then
+        log_success "新文件已创建"
+    else
+        log_error "新文件未创建"
+        return
+    fi
+    
+    # 回退到基础存档（新增文件之前）
+    if $GITSAVE_BIN load --force "$base_save_id" > /dev/null 2>&1; then
+        log_success "回退到基础存档成功"
+        
+        # 验证新文件已被删除
+        if [ ! -f "$GAMESAVE_DIR/new_file.dat" ]; then
+            log_success "回退后新增文件被正确删除"
+        else
+            log_error "回退后新增文件仍然存在（应该被删除）"
+        fi
+        
+        # 验证基础文件仍然存在
+        if [ -f "$GAMESAVE_DIR/base_file.dat" ]; then
+            log_success "基础文件仍然存在"
+        else
+            log_error "基础文件被意外删除"
+        fi
+    else
+        log_error "回退到基础存档失败"
+    fi
+}
+
 # 测试10: 存档对比
 test_compare() {
     log_info "测试10: 存档对比"
@@ -1003,6 +1051,7 @@ main() {
     test_route_switch
     test_tag
     test_load
+    test_load_removes_new_files
     test_compare
     test_export
     test_config

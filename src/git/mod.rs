@@ -73,9 +73,25 @@ impl Git2Core {
 
     pub fn checkout(&mut self, target: &str) -> Result<()> {
         let commit = self.find_commit(target)?;
+        let tree = commit.tree().map_err(SaveError::Repository)?;
+
+        // 配置 checkout 选项：移除不在目标提交中的文件
+        let mut checkout_opts = git2::build::CheckoutBuilder::new();
+        checkout_opts
+            .force()
+            .remove_untracked(true) // 删除未跟踪的文件
+            .remove_ignored(true); // 删除被忽略的文件
+
+        // 先执行 checkout 到目标 tree
+        self.repo
+            .checkout_tree(&tree.into_object(), Some(&mut checkout_opts))
+            .map_err(SaveError::Repository)?;
+
+        // 然后重置 HEAD 到目标提交
         self.repo
             .reset(&commit.into_object(), ResetType::Hard, None)
             .map_err(SaveError::Repository)?;
+
         Ok(())
     }
 
