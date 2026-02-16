@@ -1,0 +1,4 @@
+[auto_save]
+enabled = false
+interval = 300
+max_count = 10
