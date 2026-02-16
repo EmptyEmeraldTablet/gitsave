@@ -70,6 +70,56 @@ mv gitsave-linux-x86_64 ~/.local/bin/gitsave
 gitsave --version
 ```
 
+#### 环境变量配置（手动安装）
+
+安装后需要将 gitsave 所在目录添加到系统 PATH 中，才能在任意位置使用 `gitsave` 命令。
+
+**Linux / macOS:**
+
+```bash
+# 添加到用户配置（推荐）
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+
+# 如果使用 zsh
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+
+# 验证
+gitsave --version
+```
+
+**Windows:**
+
+1. **图形界面方式：**
+   - 右键"此电脑" → 属性 → 高级系统设置 → 环境变量
+   - 在"用户变量"中找到 `Path`，点击编辑
+   - 点击"新建"，添加路径：`C:\Users\你的用户名\AppData\Local\Programs\gitsave`
+   - 点击确定保存
+
+2. **PowerShell 方式（管理员）：**
+   ```powershell
+   # 添加环境变量
+   [Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Users\$env:USERNAME\AppData\Local\Programs\gitsave", "User")
+   
+   # 验证（重新打开 PowerShell）
+   gitsave --version
+   ```
+
+3. **命令提示符方式（管理员）：**
+   ```cmd
+   setx PATH "%PATH%;C:\Users\你的用户名\AppData\Local\Programs\gitsave"
+   ```
+
+**验证安装：**
+```bash
+# 所有平台通用
+gitsave --version
+
+# 应该输出：
+# gitsave 0.1.0
+```
+
 ### 方式三：从源码编译
 
 需要 Rust 1.70+ 和 libgit2 开发库：
