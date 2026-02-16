@@ -35,6 +35,9 @@ impl Git2Core {
 
     pub fn commit(&mut self, message: &str) -> Result<SaveResult> {
         let mut index = self.repo.index().map_err(SaveError::Repository)?;
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .map_err(SaveError::Repository)?;
         let tree_id = index.write_tree().map_err(SaveError::Repository)?;
         index.write().map_err(SaveError::Repository)?;
 
@@ -273,11 +276,28 @@ impl Git2Core {
             .peel_to_commit()
             .map_err(SaveError::Repository)?;
 
-        branch.delete().map_err(SaveError::Repository)?;
+        // 检查是否是当前分支
+        let is_current = self
+            .get_current_route_name()
+            .map(|n| n == old_name)
+            .unwrap_or(false);
 
-        self.repo
-            .branch(new_name, &commit, false)
-            .map_err(SaveError::Repository)?;
+        if is_current {
+            // 如果是当前分支，先切换到新分支（创建并切换）
+            self.repo
+                .branch(new_name, &commit, false)
+                .map_err(SaveError::Repository)?;
+            self.repo
+                .set_head(&format!("refs/heads/{}", new_name))
+                .map_err(SaveError::Repository)?;
+            branch.delete().map_err(SaveError::Repository)?;
+        } else {
+            // 如果不是当前分支，直接重命名
+            branch.delete().map_err(SaveError::Repository)?;
+            self.repo
+                .branch(new_name, &commit, false)
+                .map_err(SaveError::Repository)?;
+        }
 
         Ok(())
     }

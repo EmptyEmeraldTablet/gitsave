@@ -177,6 +177,13 @@ fn handle_load(
             return Ok(());
         }
 
+        // 检查是否有未提交的更改
+        let status = manager.get_status()?;
+        if status.has_uncommitted_changes && !_force {
+            eprintln!("[ERROR] Uncommitted changes. Save first or use --force");
+            std::process::exit(1);
+        }
+
         match manager.into_core().checkout(id) {
             Ok(()) => println!("Loaded save: {}", id),
             Err(SaveError::SaveNotFound(target)) => {
