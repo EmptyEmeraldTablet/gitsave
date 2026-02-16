@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgit2-dev pkg-config
+    
+    - name: Install Rust
+      uses: dtolnay/rust-action@stable
+    
+    - name: Check formatting
+      run: cargo fmt -- --check
+    
+    - name: Run clippy
+      run: cargo clippy -- -D warnings
+    
+    - name: Build
+      run: cargo build --release
+    
+    - name: Run tests
+      run: |
+        cp target/release/gitsave /tmp/gitsave
+        chmod +x /tmp/gitsave
+        export GITSAVE_BIN=/tmp/gitsave
+        ./test_gitsave.sh
+
+  build-windows:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-action@stable
+      with:
+        targets: x86_64-pc-windows-gnu
+    
+    - name: Install mingw
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y mingw-w64
+    
+    - name: Build Windows binary
+      run: cargo build --release --target x86_64-pc-windows-gnu
+    
+    - name: Upload Windows artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: gitsave-windows
+        path: target/x86_64-pc-windows-gnu/release/gitsave.exe
+
+  build-macos:
+    runs-on: macos-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: brew install libgit2
+    
+    - name: Install Rust
+      uses: dtolnay/rust-action@stable
+    
+    - name: Build macOS binary
+      run: cargo build --release
+    
+    - name: Upload macOS artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: gitsave-macos
+        path: target/release/gitsave
