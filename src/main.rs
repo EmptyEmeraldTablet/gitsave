@@ -33,6 +33,11 @@ enabled = false
     let config_path = save_dir.join("gitsave.toml");
     std::fs::write(config_path, config_content).context("Failed to write config")?;
 
+    // 创建 .gitignore 文件，忽略 gitsave.toml
+    let gitignore_path = save_dir.join(".gitignore");
+    let gitignore_content = "# Gitsave configuration file\ngitsave.toml\n";
+    std::fs::write(gitignore_path, gitignore_content).context("Failed to write .gitignore")?;
+
     println!("[OK] Initialized gitsave repository");
     println!("  Location: {}", save_dir.display());
     println!("  Git path: {}", repo.path().display());
