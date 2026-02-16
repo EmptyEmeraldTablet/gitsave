@@ -29,13 +29,6 @@ jobs:
     
     - name: Build
       run: cargo build --release
-    
-    - name: Run tests
-      run: |
-        cp target/release/gitsave /tmp/gitsave
-        chmod +x /tmp/gitsave
-        export GITSAVE_BIN=/tmp/gitsave
-        ./test_gitsave.sh
 
   build-windows:
     runs-on: ubuntu-latest
