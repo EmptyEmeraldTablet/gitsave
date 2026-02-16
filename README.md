@@ -91,33 +91,43 @@ gitsave --version
 
 **Windows:**
 
-1. **图形界面方式：**
+> ⚠️ **重要提示**：修改环境变量后，**需要重新打开命令行窗口**才能生效！
+
+1. **图形界面方式（推荐）：**
    - 右键"此电脑" → 属性 → 高级系统设置 → 环境变量
    - 在"用户变量"中找到 `Path`，点击编辑
    - 点击"新建"，添加路径：`C:\Users\你的用户名\AppData\Local\Programs\gitsave`
    - 点击确定保存
+   - **重新打开** PowerShell 或命令提示符
 
-2. **PowerShell 方式（管理员）：**
+2. **PowerShell 方式（以管理员身份运行）：**
    ```powershell
    # 添加环境变量
-   [Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Users\$env:USERNAME\AppData\Local\Programs\gitsave", "User")
+   [Environment]::SetEnvironmentVariable("Path", $env:Path + ";$env:LOCALAPPDATA\Programs\gitsave", "User")
    
-   # 验证（重新打开 PowerShell）
+   # 刷新当前会话的 PATH
+   $env:Path = [Environment]::GetEnvironmentVariable("Path", "User")
+   
+   # 验证
    gitsave --version
    ```
 
-3. **命令提示符方式（管理员）：**
+3. **命令提示符方式（以管理员身份运行）：**
    ```cmd
-   setx PATH "%PATH%;C:\Users\你的用户名\AppData\Local\Programs\gitsave"
+   setx PATH "%PATH%;%LOCALAPPDATA%\Programs\gitsave"
    ```
+   > ⚠️ 使用 setx 后**必须重新打开**命令提示符才能生效！
 
 **验证安装：**
+
+> ⚠️ **Windows 用户注意**：如果刚安装或修改了 PATH，请**重新打开** PowerShell/命令提示符后再验证！
+
 ```bash
 # 所有平台通用
 gitsave --version
 
 # 应该输出：
-# gitsave 0.1.0
+# gitsave 0.1.2
 ```
 
 ### 方式三：从源码编译

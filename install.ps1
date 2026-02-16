@@ -83,8 +83,11 @@ function Main {
     if ($currentPath -notlike "*$targetDir*") {
         Write-Info "添加到 PATH 环境变量..."
         [Environment]::SetEnvironmentVariable("Path", "$currentPath;$targetDir", "User")
-        $env:Path = "$env:Path;$targetDir"
+        # 刷新当前会话的 PATH
+        $env:Path = [Environment]::GetEnvironmentVariable("Path", "User")
         Write-Success "已添加到 PATH"
+    } else {
+        Write-Info "PATH 中已包含安装目录"
     }
     
     # 验证
