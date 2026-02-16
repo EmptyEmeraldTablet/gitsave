@@ -75,6 +75,22 @@ impl Git2Core {
         let commit = self.find_commit(target)?;
         let tree = commit.tree().map_err(SaveError::Repository)?;
 
+        // 在重置之前，创建一个临时标签保存当前状态（防止丢失后续提交）
+        if let Ok(head) = self.repo.head() {
+            if let Ok(head_commit) = head.peel_to_commit() {
+                let timestamp = chrono::Local::now().timestamp();
+                let temp_tag = format!("_autosave_{}", timestamp);
+                let sig = self.repo.signature().map_err(SaveError::Repository)?;
+                let _ = self.repo.tag(
+                    &temp_tag,
+                    &head_commit.into_object(),
+                    &sig,
+                    "Auto-save before checkout",
+                    false,
+                );
+            }
+        }
+
         // 配置 checkout 选项：移除不在目标提交中的文件
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
         checkout_opts
@@ -97,14 +113,35 @@ impl Git2Core {
 
     pub fn get_history(&self) -> Result<Vec<SaveEntry>> {
         let mut entries = Vec::new();
-        let head = self.repo.head().map_err(SaveError::Repository)?;
-        let branch_name = self.get_current_route_name()?;
+        let mut seen_oids = std::collections::HashSet::new();
+        let current_route = self
+            .get_current_route_name()
+            .unwrap_or_else(|_| "unknown".to_string());
 
         let mut revwalk = self.repo.revwalk().map_err(SaveError::Repository)?;
-        revwalk.push_head().map_err(SaveError::Repository)?;
+
+        // 推送所有分支的 HEAD，确保能看到所有提交
+        let branches = self.repo.branches(None).map_err(SaveError::Repository)?;
+        for branch_result in branches {
+            if let Ok((branch, _)) = branch_result {
+                if let Ok(reference) = branch.get().peel_to_commit() {
+                    let _ = revwalk.push(reference.id());
+                }
+            }
+        }
+
+        // 同时推送当前 HEAD
+        let _ = revwalk.push_head();
 
         for oid in revwalk {
             let oid = oid.map_err(SaveError::Repository)?;
+
+            // 去重：避免同一个提交出现在多个分支中
+            if seen_oids.contains(&oid) {
+                continue;
+            }
+            seen_oids.insert(oid);
+
             let commit = self.repo.find_commit(oid).map_err(SaveError::Repository)?;
 
             let message = commit.message().unwrap_or("").to_string();
@@ -116,7 +153,7 @@ impl Git2Core {
                 short_id: oid.to_string()[..7].to_string(),
                 message,
                 timestamp,
-                route: branch_name.clone(),
+                route: current_route.clone(),
                 is_current: false,
             });
         }
@@ -438,14 +475,28 @@ impl Git2Core {
     }
 
     fn find_commit(&self, target: &str) -> Result<Commit> {
+        // 首先尝试直接解析 OID
         if let Ok(oid) = Oid::from_str(target) {
             if let Ok(commit) = self.repo.find_commit(oid) {
                 return Ok(commit);
             }
         }
 
+        // 在所有引用中搜索（所有分支、所有提交）
         let mut revwalk = self.repo.revwalk().map_err(SaveError::Repository)?;
-        revwalk.push_head().map_err(SaveError::Repository)?;
+
+        // 推送所有分支的 HEAD
+        let branches = self.repo.branches(None).map_err(SaveError::Repository)?;
+        for branch_result in branches {
+            if let Ok((branch, _)) = branch_result {
+                if let Ok(reference) = branch.get().peel_to_commit() {
+                    let _ = revwalk.push(reference.id());
+                }
+            }
+        }
+
+        // 同时推送当前 HEAD
+        let _ = revwalk.push_head();
 
         for oid in revwalk {
             let oid = oid.map_err(SaveError::Repository)?;
