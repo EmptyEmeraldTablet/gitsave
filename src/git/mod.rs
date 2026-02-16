@@ -72,24 +72,31 @@ impl Git2Core {
     }
 
     pub fn checkout(&mut self, target: &str) -> Result<()> {
-        let commit = self.find_commit(target)?;
-        let tree = commit.tree().map_err(SaveError::Repository)?;
-
-        // 在重置之前，创建一个临时标签保存当前状态（防止丢失后续提交）
+        // 在查找目标提交之前，先保存当前 HEAD 到标签（防止后续提交丢失）
         if let Ok(head) = self.repo.head() {
             if let Ok(head_commit) = head.peel_to_commit() {
-                let timestamp = chrono::Local::now().timestamp();
-                let temp_tag = format!("_autosave_{}", timestamp);
+                // 获取当前分支名，用于创建分支特定的标签
+                let branch_name = head.shorthand().unwrap_or("HEAD");
+                let tag_name = format!("_gitsave_tip_{}", branch_name);
+
                 let sig = self.repo.signature().map_err(SaveError::Repository)?;
+
+                // 如果标签已存在，先删除它
+                let _ = self.repo.tag_delete(&tag_name);
+
+                // 创建新标签指向当前 HEAD，确保后续提交不会悬空
                 let _ = self.repo.tag(
-                    &temp_tag,
+                    &tag_name,
                     &head_commit.into_object(),
                     &sig,
-                    "Auto-save before checkout",
+                    "Gitsave tip preservation tag",
                     false,
                 );
             }
         }
+
+        let commit = self.find_commit(target)?;
+        let tree = commit.tree().map_err(SaveError::Repository)?;
 
         // 配置 checkout 选项：移除不在目标提交中的文件
         let mut checkout_opts = git2::build::CheckoutBuilder::new();
@@ -132,6 +139,16 @@ impl Git2Core {
 
         // 同时推送当前 HEAD
         let _ = revwalk.push_head();
+
+        // 推送所有标签指向的提交（包括 _gitsave_tip_* 标签）
+        let tag_names = self.repo.tag_names(None).map_err(SaveError::Repository)?;
+        for tag_name in tag_names.iter() {
+            if let Some(name) = tag_name {
+                if let Ok(oid) = self.repo.refname_to_id(&format!("refs/tags/{}", name)) {
+                    let _ = revwalk.push(oid);
+                }
+            }
+        }
 
         for oid in revwalk {
             let oid = oid.map_err(SaveError::Repository)?;
@@ -482,7 +499,7 @@ impl Git2Core {
             }
         }
 
-        // 在所有引用中搜索（所有分支、所有提交）
+        // 在所有引用中搜索（所有分支、所有标签、所有提交）
         let mut revwalk = self.repo.revwalk().map_err(SaveError::Repository)?;
 
         // 推送所有分支的 HEAD
@@ -497,6 +514,16 @@ impl Git2Core {
 
         // 同时推送当前 HEAD
         let _ = revwalk.push_head();
+
+        // 推送所有标签指向的提交（包括 _gitsave_tip_* 标签）
+        let tag_names = self.repo.tag_names(None).map_err(SaveError::Repository)?;
+        for tag_name in tag_names.iter() {
+            if let Some(name) = tag_name {
+                if let Ok(oid) = self.repo.refname_to_id(&format!("refs/tags/{}", name)) {
+                    let _ = revwalk.push(oid);
+                }
+            }
+        }
 
         for oid in revwalk {
             let oid = oid.map_err(SaveError::Repository)?;
