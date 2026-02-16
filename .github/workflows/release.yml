@@ -68,7 +68,7 @@ jobs:
           sudo apt-get install -y libgit2-dev pkg-config
       
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
       
       - name: Build Linux binary
         run: |
@@ -94,7 +94,7 @@ jobs:
       - uses: actions/checkout@v4
       
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-gnu
       
@@ -130,7 +130,7 @@ jobs:
           brew install libgit2
       
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
       
       - name: Build macOS binary
         run: |
@@ -160,7 +160,7 @@ jobs:
           brew install libgit2
       
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
       
@@ -192,7 +192,7 @@ jobs:
           sudo apt-get install -y libgit2-dev pkg-config
       
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
       
       - name: Run tests
         run: |
