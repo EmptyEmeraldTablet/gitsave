@@ -69,12 +69,6 @@ impl SaveManager {
         if status.has_uncommitted_changes && !force {
             return Err(SaveError::UncommittedChanges);
         }
-        if !force && status.has_uncommitted_changes {
-            return Err(SaveError::UncommittedChanges);
-        }
-        if status.has_uncommitted_changes && !force {
-            return Err(SaveError::UncommittedChanges);
-        }
         self.core.checkout_by_tag(tag_name)?;
         Ok(())
     }

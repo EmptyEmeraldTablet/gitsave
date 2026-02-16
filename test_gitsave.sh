@@ -99,24 +99,10 @@ test_init() {
     cd "$GAMESAVE_DIR"
     
     if $GITSAVE_BIN init; then
-        if [ -d ".git" ] && [ -f "gitsave.toml" ]; then
+        if [ -d ".git" ] && [ -f ".git/gitsave.toml" ]; then
             log_success "仓库初始化成功"
         else
             log_error "仓库初始化失败：缺少 .git 或 gitsave.toml"
-        fi
-        
-        # 验证 .gitignore 文件
-        if [ -f ".gitignore" ]; then
-            log_success ".gitignore 文件创建成功"
-            
-            # 验证 .gitignore 包含 gitsave.toml
-            if grep -q "gitsave.toml" .gitignore; then
-                log_success ".gitignore 正确包含 gitsave.toml"
-            else
-                log_error ".gitignore 缺少 gitsave.toml"
-            fi
-        else
-            log_error ".gitignore 文件未创建"
         fi
     else
         log_error "仓库初始化命令失败"
@@ -185,42 +171,32 @@ test_save_again() {
     fi
 }
 
-# 测试4b: .gitignore 功能测试
-test_gitignore_functionality() {
-    log_info "测试4b: .gitignore 功能测试"
+# 测试4b: 配置文件位置测试
+test_config_location() {
+    log_info "测试4b: 配置文件位置测试"
     cd "$GAMESAVE_DIR"
     
-    # 验证 .gitignore 文件存在
-    if [ -f ".gitignore" ]; then
-        log_success ".gitignore 文件存在"
+    local config_path=".git/gitsave.toml"
+    if [ -f "$config_path" ]; then
+        log_success "配置存储在 .git 目录下"
     else
-        log_error ".gitignore 文件不存在"
+        log_error "缺少 .git/gitsave.toml"
         return
     fi
     
-    # 验证 .gitignore 内容
-    if grep -q "gitsave.toml" .gitignore; then
-        log_success ".gitignore 包含 gitsave.toml"
-    else
-        log_error ".gitignore 不包含 gitsave.toml"
-    fi
+    echo "# Test modification" >> "$config_path"
     
-    # 修改 gitsave.toml 文件
-    echo "# Test modification" >> "$GAMESAVE_DIR/gitsave.toml"
-    
-    # 验证 git status 不显示 gitsave.toml 为未跟踪文件
     if git status --porcelain | grep -q "gitsave.toml"; then
-        log_error "gitsave.toml 出现在 git status 中（应该被忽略）"
+        log_error "修改 .git/gitsave.toml 导致工作区脏数据"
     else
-        log_success "gitsave.toml 被正确忽略"
+        log_success "修改配置不会影响工作区"
     fi
     
-    # 验证 gitsave status 也不显示
     output=$($GITSAVE_BIN status 2>&1)
     if echo "$output" | grep -q "gitsave.toml"; then
-        log_error "gitsave.toml 出现在 gitsave status 中（应该被忽略）"
+        log_error "gitsave status 错误地显示了配置文件"
     else
-        log_success "gitsave status 正确忽略 gitsave.toml"
+        log_success "gitsave status 正确忽略配置文件"
     fi
 }
 
@@ -1045,7 +1021,7 @@ main() {
     test_save
     test_status
     test_save_again
-    test_gitignore_functionality
+    test_config_location
     test_history
     test_route_create
     test_route_switch

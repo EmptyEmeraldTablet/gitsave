@@ -735,10 +735,10 @@ Auto-save configuration:
 
 ## 配置文件
 
-Gitsave 使用 `gitsave.toml` 文件存储配置。
+Gitsave 将配置写入 `.git/gitsave.toml`。这样即使玩家执行“整目录回滚”（将工作目录恢复到早期快照而不是 Git 的工作树重置），配置文件仍然随 `.git` 保存下来，不会因为 `.gitignore` 忽略策略而丢失。除非你明确要迁移仓库，否则不需要手动编辑此文件的位置。
 
 ```toml
-# gitsave.toml
+# .git/gitsave.toml
 
 [save]
 max_history = 50

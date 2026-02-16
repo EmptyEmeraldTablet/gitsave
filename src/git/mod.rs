@@ -4,7 +4,8 @@ use crate::core::{
 };
 use crate::error::{Result, SaveError};
 use chrono::{DateTime, Utc};
-use git2::{BranchType, Commit, DiffOptions, Oid, Repository, ResetType};
+use git2::{BranchType, Commit, DiffOptions, Oid, Patch, Repository, ResetType};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub struct Git2Core {
@@ -113,10 +114,11 @@ impl Git2Core {
 
     pub fn get_history(&self) -> Result<Vec<SaveEntry>> {
         let mut entries = Vec::new();
-        let mut seen_oids = std::collections::HashSet::new();
+        let mut seen_oids = HashSet::new();
         let current_route = self
             .get_current_route_name()
             .unwrap_or_else(|_| "unknown".to_string());
+        let commit_owner_map = self.build_commit_owner_map()?;
 
         let mut revwalk = self.repo.revwalk().map_err(SaveError::Repository)?;
 
@@ -165,12 +167,17 @@ impl Git2Core {
             let timestamp = DateTime::from_timestamp(commit.time().seconds(), 0)
                 .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
 
+            let route = commit_owner_map
+                .get(&oid)
+                .cloned()
+                .unwrap_or_else(|| current_route.clone());
+
             entries.push(SaveEntry {
                 id: oid.to_string(),
                 short_id: oid.to_string()[..7].to_string(),
                 message,
                 timestamp,
-                route: current_route.clone(),
+                route,
                 is_current: false,
             });
         }
@@ -377,6 +384,61 @@ impl Git2Core {
         Ok(())
     }
 
+    fn build_commit_owner_map(&self) -> Result<HashMap<Oid, String>> {
+        let mut owners = HashMap::new();
+
+        let branches = self
+            .repo
+            .branches(Some(BranchType::Local))
+            .map_err(SaveError::Repository)?;
+        for branch_result in branches {
+            let (branch, _) = branch_result.map_err(SaveError::Repository)?;
+            let branch_display_name = branch
+                .name()
+                .ok()
+                .flatten()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            if let Some(reference_name) = branch.get().name() {
+                let mut branch_walk = self.repo.revwalk().map_err(SaveError::Repository)?;
+                branch_walk
+                    .push_ref(reference_name)
+                    .map_err(SaveError::Repository)?;
+
+                for oid in branch_walk {
+                    let oid = oid.map_err(SaveError::Repository)?;
+                    owners
+                        .entry(oid)
+                        .or_insert_with(|| branch_display_name.clone());
+                }
+            }
+        }
+
+        let tag_names = self.repo.tag_names(None).map_err(SaveError::Repository)?;
+        for tag_name in tag_names.iter().flatten() {
+            if let Ok(tag_ref) = self.repo.refname_to_id(&format!("refs/tags/{}", tag_name)) {
+                // 先尝试解析为带注释的标签
+                if let Ok(tag) = self.repo.find_tag(tag_ref) {
+                    if let Ok(commit) = tag.target().and_then(|t| t.peel_to_commit()) {
+                        owners
+                            .entry(commit.id())
+                            .or_insert_with(|| format!("tag:{}", tag_name));
+                        continue;
+                    }
+                }
+
+                if let Ok(commit) = self.repo.find_commit(tag_ref) {
+                    owners
+                        .entry(commit.id())
+                        .or_insert_with(|| format!("tag:{}", tag_name));
+                }
+            }
+        }
+
+        Ok(owners)
+    }
+
     pub fn get_tag_commit(&self, tag_name: &str) -> Result<Commit> {
         let tag_names = self.repo.tag_names(None)?;
         let mut tag_oid = None;
@@ -430,37 +492,47 @@ impl Git2Core {
             .map_err(SaveError::Repository)?;
 
         let mut changed_files = Vec::new();
-        let mut additions = 0;
-        let mut deletions = 0;
+        let mut additions = 0usize;
+        let mut deletions = 0usize;
 
-        for delta in diff.deltas() {
-            let new_file = delta.new_file();
-            let old_file = delta.old_file();
-            let new_path = new_file.path().map(|p| p.to_string_lossy().to_string());
-            let old_path = old_file.path().map(|p| p.to_string_lossy().to_string());
+        for (idx, delta) in diff.deltas().enumerate() {
+            let path = delta
+                .new_file()
+                .path()
+                .or_else(|| delta.old_file().path())
+                .map(|p| p.to_string_lossy().to_string());
 
-            let is_new =
-                old_path.is_none() || (old_path == new_path && new_file.id() == Oid::zero());
-            let is_deleted =
-                new_path.is_none() || (old_path == new_path && new_file.id() == Oid::zero());
+            let (file_adds, file_dels) = match Patch::from_diff(&diff, idx) {
+                Ok(Some(patch)) => {
+                    let (_, adds, dels) = patch.line_stats().map_err(SaveError::Repository)?;
+                    (adds as usize, dels as usize)
+                }
+                _ => {
+                    let (adds, dels) = match delta.status() {
+                        git2::Delta::Added => (1, 0),
+                        git2::Delta::Deleted => (0, 1),
+                        _ => (1, 1),
+                    };
+                    (adds, dels)
+                }
+            };
 
-            if is_new {
-                additions += 1;
-            } else if is_deleted {
-                deletions += 1;
-            } else {
-                additions += 1;
-                deletions += 1;
-            }
+            additions += file_adds;
+            deletions += file_dels;
 
-            if let Some(path) = new_path.or(old_path) {
+            if let Some(path) = path {
                 changed_files.push(ChangedFile {
                     path,
-                    additions: if is_new { 1 } else { 0 },
-                    deletions: if is_deleted { 1 } else { 0 },
+                    additions: file_adds,
+                    deletions: file_dels,
                 });
             }
         }
+
+        let owner_map = self.build_commit_owner_map()?;
+        let default_route = self
+            .get_current_route_name()
+            .unwrap_or_else(|_| "unknown".to_string());
 
         let entry1 = SaveEntry {
             id: oid1.to_string(),
@@ -468,7 +540,10 @@ impl Git2Core {
             message: commit1.message().unwrap_or("").to_string(),
             timestamp: DateTime::from_timestamp(commit1.time().seconds(), 0)
                 .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH),
-            route: self.get_current_route_name()?,
+            route: owner_map
+                .get(&oid1)
+                .cloned()
+                .unwrap_or_else(|| default_route.clone()),
             is_current: false,
         };
 
@@ -478,7 +553,10 @@ impl Git2Core {
             message: commit2.message().unwrap_or("").to_string(),
             timestamp: DateTime::from_timestamp(commit2.time().seconds(), 0)
                 .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH),
-            route: self.get_current_route_name()?,
+            route: owner_map
+                .get(&oid2)
+                .cloned()
+                .unwrap_or_else(|| default_route.clone()),
             is_current: false,
         };
 

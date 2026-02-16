@@ -1,6 +1,4 @@
 use chrono::{DateTime, Utc};
-use git2::Oid;
-
 #[derive(Debug, Clone)]
 pub struct SaveEntry {
     pub id: String,

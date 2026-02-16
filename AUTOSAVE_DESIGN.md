@@ -84,3 +84,14 @@ gitsave autosave --watch --on-change
 # 显示当前配置
 gitsave autosave --status
 ```
+
+### TUI 集成规划
+
+为了避免在 CLI 中引入伪实时守护逻辑，自动保存调度将与未来的 TUI 客户端协作实施：
+
+1. **事件驱动刷新**：TUI 将维护一个异步任务（基于 tokio runtime 或 crossbeam channel），周期性调用 `SaveManager::should_auto_save()` 并在满足条件时触发 `save`，确保 UI 能展示倒计时与最近一次自动保存结果。
+2. **统一状态模型**：TUI 需要读取 `.git/gitsave.toml` 中的自动保存配置，并在 UI 中提供启用、禁用、间隔和最大数量的可视化控制，所有设置仍通过 CLI 同步写回配置文件。
+3. **安全开关**：在 TUI 中暴露“实时模式”开关，确保在性能受限的机器上可以手动暂停自动保存，或切换回 CLI-only 模式。
+4. **可视化反馈**：TUI 的历史视图展示从 `Git2Core::get_history()` 返回的路线信息，可直接标记由自动保存对应的提交，并允许用户一键清理 `_autosave_*` 标签。
+
+在实现 TUI 前，CLI 的 autosave 命令仅负责配置管理；真正的定时触发将由 TUI 统一驱动，避免重复实现轮询逻辑。
