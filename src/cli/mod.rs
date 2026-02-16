@@ -50,6 +50,9 @@ pub enum Commands {
 
     #[command(about = "Manage routes (branches)")]
     Route {
+        #[arg(short, long, action = clap::ArgAction::SetTrue)]
+        list: bool,
+
         #[command(subcommand)]
         command: Option<RouteCommands>,
     },

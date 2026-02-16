@@ -239,6 +239,20 @@ test_route_create() {
     fi
 }
 
+# 测试6b: CLI 路线列表 flag
+test_route_list_flag() {
+    log_info "测试6b: 路线列表 --list flag"
+    cd "$GAMESAVE_DIR"
+
+    output=$($GITSAVE_BIN route --list 2>&1)
+    if echo "$output" | grep -q "Routes:"; then
+        log_success "--list flag 输出路线列表"
+    else
+        log_error "--list flag 未输出路线列表"
+        echo "$output"
+    fi
+}
+
 # 测试7: 路线管理 - 切换路线
 test_route_switch() {
     log_info "测试7: 切换路线"
@@ -1024,6 +1038,7 @@ main() {
     test_config_location
     test_history
     test_route_create
+    test_route_list_flag
     test_route_switch
     test_tag
     test_load
