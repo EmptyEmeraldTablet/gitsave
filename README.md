@@ -42,15 +42,15 @@ TUI 是首选交互方式，适合频繁保存/回滚场景：
 - 支持快捷键快速保存、回滚、切换路线。
 - 所有危险操作会弹出确认提示。
 
-完整 TUI 说明请见 `docs/TUI.md`。
+完整 TUI 说明请见 [docs/TUI.md](docs/TUI.md)。
 
 ## 文档索引
 
-- 安装与环境配置：`docs/INSTALL.md`
-- 详细命令参考：`docs/COMMANDS.md`
-- TUI 交互说明：`docs/TUI.md`
-- 测试说明：`docs/TESTING.md`
-- 常见问题与注意事项：`docs/FAQ.md`
+- 安装与环境配置：[docs/INSTALL.md](docs/INSTALL.md)
+- 详细命令参考：[docs/COMMANDS.md](docs/COMMANDS.md)
+- TUI 交互说明：[docs/TUI.md](docs/TUI.md)
+- 测试说明：[docs/TESTING.md](docs/TESTING.md)
+- 常见问题与注意事项：[docs/FAQ.md](docs/FAQ.md)
 
 ## 规划中功能
 
