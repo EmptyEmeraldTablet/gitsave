@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use chrono::Local;
 use crossterm::ExecutableCommand;
+use crossterm::cursor::SetCursorStyle;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -15,7 +16,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::terminal::Terminal;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::core::{RouteInfo, SaveEntry, SaveStatus};
 use crate::error::SaveError;
@@ -45,8 +46,20 @@ pub fn run(save_dir: &Path) -> Result<()> {
     let mut app = AppState::new(save_dir.to_path_buf())?;
     let tick_rate = Duration::from_millis(200);
     let mut should_quit = false;
+    let mut cursor_busy = false;
 
     while !should_quit {
+        let busy_now = app.busy.is_some();
+        if busy_now != cursor_busy {
+            let style = if busy_now {
+                SetCursorStyle::SteadyBar
+            } else {
+                SetCursorStyle::SteadyBlock
+            };
+            terminal.backend_mut().execute(style)?;
+            cursor_busy = busy_now;
+        }
+
         terminal.draw(|f| draw_ui(f, &app))?;
 
         if event::poll(tick_rate)? {
@@ -67,6 +80,9 @@ pub fn run(save_dir: &Path) -> Result<()> {
     }
 
     disable_raw_mode()?;
+    terminal
+        .backend_mut()
+        .execute(SetCursorStyle::DefaultUserShape)?;
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
@@ -644,9 +660,9 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
         .constraints(
             [
                 Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(4),
-                Constraint::Length(2),
+                Constraint::Percentage(60),
+                Constraint::Percentage(25),
+                Constraint::Length(3),
             ]
             .as_ref(),
         )
@@ -676,7 +692,7 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
 
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)].as_ref())
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
         .split(chunks[1]);
 
     draw_routes_panel(f, body_chunks[0], app);
@@ -706,6 +722,19 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
         Span::raw("  autosave runs automatically when enabled"),
     ]));
     f.render_widget(help, chunks[3]);
+
+    if let Some(modal) = ModalOverlay::from_app(app) {
+        let area = centered_rect(60, 40, f.size());
+        f.render_widget(Clear, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(modal.title)
+            .border_style(Style::default().fg(Color::Yellow));
+        let widget = Paragraph::new(modal.lines)
+            .block(block)
+            .wrap(Wrap { trim: true });
+        f.render_widget(widget, area);
+    }
 }
 
 fn draw_routes_panel(f: &mut Frame, area: Rect, app: &AppState) {
@@ -906,7 +935,7 @@ fn draw_notifications(f: &mut Frame, area: Rect, app: &AppState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Notifications");
-    let mut lines: Vec<Line> = if app.notifications.is_empty() {
+    let lines: Vec<Line> = if app.notifications.is_empty() {
         vec![Line::from("No events yet")]
     } else {
         app.notifications
@@ -919,22 +948,70 @@ fn draw_notifications(f: &mut Frame, area: Rect, app: &AppState) {
             .collect()
     };
 
-    match &app.mode {
-        UiMode::CreateRoute { buffer } => {
-            lines.insert(0, Line::from("Press Enter to confirm, Esc to cancel"));
-            lines.insert(0, Line::from(format!("> {}", buffer)));
-            lines.insert(0, Line::from("Create new route:"));
-        }
-        UiMode::ConfirmAction { prompt, .. } => {
-            lines.insert(0, Line::from(format!("{} [y/n]", prompt)));
-        }
-        UiMode::Normal => {}
-    }
-
     let widget = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
     f.render_widget(widget, area);
 }
 
 fn is_valid_route_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/')
+}
+
+struct ModalOverlay {
+    title: String,
+    lines: Vec<Line<'static>>,
+}
+
+impl ModalOverlay {
+    fn from_app(app: &AppState) -> Option<Self> {
+        match &app.mode {
+            UiMode::Normal => None,
+            UiMode::CreateRoute { buffer } => {
+                let mut lines = Vec::new();
+                lines.push(Line::from("Enter a new route name."));
+                lines.push(Line::from(format!("> {}", buffer)));
+                lines.push(Line::from("Allowed: letters, digits, -, _, /."));
+                lines.push(Line::from("Enter = confirm · Esc = cancel"));
+                Some(Self {
+                    title: "Create Route".to_string(),
+                    lines,
+                })
+            }
+            UiMode::ConfirmAction { prompt, .. } => {
+                let lines = vec![
+                    Line::from(prompt.clone()),
+                    Line::from("Press y to confirm, n or Esc to cancel."),
+                ];
+                Some(Self {
+                    title: "Confirm Action".to_string(),
+                    lines,
+                })
+            }
+        }
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage(percent_x),
+                Constraint::Percentage((100 - percent_x) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(area);
+
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage(percent_y),
+                Constraint::Percentage((100 - percent_y) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(horizontal[1])[1]
 }
