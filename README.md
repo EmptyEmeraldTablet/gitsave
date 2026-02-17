@@ -4,6 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](https://opensource.org/licenses/MIT)
 
 Gitsave 是一个专为游戏存档设计的 Git 管理工具，简化了 Git 的使用流程，让玩家轻松管理游戏进度。
+<img width="1896" height="965" alt="image" src="https://github.com/user-attachments/assets/58955e0e-e530-44bd-9bbc-68ecaf7b17ab" />
 
 ## 特性
 
