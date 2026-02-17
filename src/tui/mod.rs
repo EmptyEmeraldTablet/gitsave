@@ -25,6 +25,8 @@ use crate::manager::{AutoSaveConfig, ConfigManager, RouteManager, SaveManager};
 
 const AUTO_REFRESH_SECS: u64 = 10;
 const AUTO_SAVE_POLL_SECS: u64 = 1;
+const BUSY_REDRAW_MS: u64 = 500;
+const TICK_RATE_MS: u64 = 400;
 const MAX_NOTIFICATION_LINES: usize = 4;
 
 pub fn run(save_dir: &Path) -> Result<()> {
@@ -44,9 +46,12 @@ pub fn run(save_dir: &Path) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = AppState::new(save_dir.to_path_buf())?;
-    let tick_rate = Duration::from_millis(200);
+    let tick_rate = Duration::from_millis(TICK_RATE_MS);
     let mut should_quit = false;
     let mut cursor_busy = false;
+    let mut last_busy_redraw = Instant::now();
+
+    app.mark_dirty();
 
     while !should_quit {
         let busy_now = app.busy.is_some();
@@ -58,9 +63,23 @@ pub fn run(save_dir: &Path) -> Result<()> {
             };
             terminal.backend_mut().execute(style)?;
             cursor_busy = busy_now;
+            app.mark_dirty();
         }
 
-        terminal.draw(|f| draw_ui(f, &app))?;
+        let mut should_draw = app.dirty;
+        if !should_draw
+            && busy_now
+            && last_busy_redraw.elapsed() >= Duration::from_millis(BUSY_REDRAW_MS)
+        {
+            should_draw = true;
+        }
+        if should_draw {
+            terminal.draw(|f| draw_ui(f, &app))?;
+            app.clear_dirty();
+            if busy_now {
+                last_busy_redraw = Instant::now();
+            }
+        }
 
         if event::poll(tick_rate)? {
             match event::read()? {
@@ -69,13 +88,17 @@ pub fn run(save_dir: &Path) -> Result<()> {
                         break;
                     }
                 }
-                Event::Resize(_, _) => app.refresh()?,
+                Event::Resize(_, _) => {
+                    app.refresh()?;
+                    app.mark_dirty();
+                }
                 _ => {}
             }
         }
 
         if app.last_refresh.elapsed() >= Duration::from_secs(AUTO_REFRESH_SECS) {
             app.refresh()?;
+            app.mark_dirty();
         }
     }
 
@@ -138,6 +161,7 @@ struct AppState {
     mode: UiMode,
     follow_current_route: bool,
     busy: Option<BusyIndicator>,
+    dirty: bool,
 }
 
 impl AppState {
@@ -163,6 +187,7 @@ impl AppState {
             mode: UiMode::Normal,
             follow_current_route: true,
             busy: None,
+            dirty: true,
         };
         state.log_info("TUI ready. Press r to refresh, q to quit.");
         state.refresh()?;
@@ -196,7 +221,16 @@ impl AppState {
 
         self.autosave = ConfigManager::new(&self.save_dir).load_auto_save_config();
         self.last_refresh = Instant::now();
+        self.mark_dirty();
         Ok(())
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn clear_dirty(&mut self) {
+        self.dirty = false;
     }
 
     fn current_route_name(&self) -> Option<String> {
@@ -291,67 +325,117 @@ impl AppState {
     fn handle_key(&mut self, code: KeyCode, should_quit: &mut bool) -> Result<bool> {
         match &mut self.mode {
             UiMode::Normal => {
+                let mut handled = false;
                 match code {
                     KeyCode::Char('q') => {
                         *should_quit = true;
                         return Ok(true);
                     }
-                    KeyCode::Char('r') => self.with_busy("Refreshing...", |s| s.refresh())?,
+                    KeyCode::Char('r') => {
+                        self.with_busy("Refreshing...", |s| s.refresh())?;
+                        handled = true;
+                    }
                     KeyCode::Char('s') => {
                         self.request_quick_save();
+                        handled = true;
                     }
                     KeyCode::Char('l') => {
                         self.request_load_selected();
+                        handled = true;
                     }
-                    KeyCode::Char('c') => self.start_route_prompt(),
-                    KeyCode::Char('a') => self.trigger_manual_autosave()?,
-                    KeyCode::Enter => self.activate_selection(),
-                    KeyCode::Tab => self.toggle_focus(),
-                    KeyCode::Down | KeyCode::Char('j') => self.move_down(),
-                    KeyCode::Up | KeyCode::Char('k') => self.move_up(),
-                    KeyCode::PageDown => self.page_down(),
-                    KeyCode::PageUp => self.page_up(),
+                    KeyCode::Char('c') => {
+                        self.start_route_prompt();
+                        handled = true;
+                    }
+                    KeyCode::Char('a') => {
+                        self.trigger_manual_autosave()?;
+                        handled = true;
+                    }
+                    KeyCode::Enter => {
+                        self.activate_selection();
+                        handled = true;
+                    }
+                    KeyCode::Tab => {
+                        self.toggle_focus();
+                        handled = true;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.move_down();
+                        handled = true;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.move_up();
+                        handled = true;
+                    }
+                    KeyCode::PageDown => {
+                        self.page_down();
+                        handled = true;
+                    }
+                    KeyCode::PageUp => {
+                        self.page_up();
+                        handled = true;
+                    }
                     _ => {}
+                }
+                if handled {
+                    self.mark_dirty();
                 }
                 Ok(false)
             }
             UiMode::CreateRoute { buffer } => {
+                let mut handled = false;
                 match code {
-                    KeyCode::Esc => self.cancel_route_prompt(),
+                    KeyCode::Esc => {
+                        self.cancel_route_prompt();
+                        handled = true;
+                    }
                     KeyCode::Enter => {
                         self.prepare_route_creation()?;
+                        handled = true;
                     }
                     KeyCode::Backspace => {
                         buffer.pop();
+                        handled = true;
                     }
                     KeyCode::Char(ch) => {
                         if is_valid_route_char(ch) {
                             buffer.push(ch);
+                            handled = true;
                         }
                     }
                     _ => {}
                 }
+                if handled {
+                    self.mark_dirty();
+                }
                 Ok(false)
             }
             UiMode::ConfirmAction { action, .. } => {
+                let mut handled = false;
                 match code {
                     KeyCode::Char(ch) => match ch.to_ascii_lowercase() {
                         'y' => {
                             let pending = action.clone();
                             self.mode = UiMode::Normal;
                             self.execute_pending_action(pending)?;
+                            handled = true;
                         }
                         'n' => {
                             self.log_info("Action cancelled");
                             self.mode = UiMode::Normal;
+                            handled = true;
                         }
                         _ => {}
                     },
                     KeyCode::Esc => {
                         self.log_info("Action cancelled");
                         self.mode = UiMode::Normal;
+                        handled = true;
                     }
                     _ => {}
+                }
+                if handled {
+                    self.mark_dirty();
                 }
                 Ok(false)
             }
@@ -596,8 +680,10 @@ impl AppState {
         F: FnMut(&mut Self) -> Result<()>,
     {
         self.busy = Some(BusyIndicator::new(message));
+        self.mark_dirty();
         let result = action(self);
         self.busy = None;
+        self.mark_dirty();
         result
     }
 }
