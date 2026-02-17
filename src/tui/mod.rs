@@ -121,6 +121,7 @@ struct AppState {
     notifications: Vec<UiLogEntry>,
     mode: UiMode,
     follow_current_route: bool,
+    busy: Option<BusyIndicator>,
 }
 
 impl AppState {
@@ -145,6 +146,7 @@ impl AppState {
             notifications: Vec::new(),
             mode: UiMode::Normal,
             follow_current_route: true,
+            busy: None,
         };
         state.log_info("TUI ready. Press r to refresh, q to quit.");
         state.refresh()?;
@@ -278,7 +280,7 @@ impl AppState {
                         *should_quit = true;
                         return Ok(true);
                     }
-                    KeyCode::Char('r') => self.refresh()?,
+                    KeyCode::Char('r') => self.with_busy("Refreshing...", |s| s.refresh())?,
                     KeyCode::Char('s') => {
                         self.request_quick_save();
                     }
@@ -286,11 +288,7 @@ impl AppState {
                         self.request_load_selected();
                     }
                     KeyCode::Char('c') => self.start_route_prompt(),
-                    KeyCode::Char('a') => {
-                        if let Err(err) = self.maybe_auto_save(true) {
-                            self.log_error(format!("Auto-save failed: {}", err));
-                        }
-                    }
+                    KeyCode::Char('a') => self.trigger_manual_autosave()?,
                     KeyCode::Enter => self.activate_selection(),
                     KeyCode::Tab => self.toggle_focus(),
                     KeyCode::Down | KeyCode::Char('j') => self.move_down(),
@@ -382,6 +380,10 @@ impl AppState {
         Ok(())
     }
 
+    fn trigger_manual_autosave(&mut self) -> Result<()> {
+        self.with_busy("Auto-saving...", |s| s.maybe_auto_save(true))
+    }
+
     fn log_info(&mut self, message: impl Into<String>) {
         self.push_notification(UiLogEntry::info(message.into()));
     }
@@ -467,71 +469,79 @@ impl AppState {
     }
 
     fn perform_quick_save(&mut self) -> Result<()> {
-        let mut manager = SaveManager::new(Git2Core::open(&self.save_dir)?);
-        if self.status.has_uncommitted_changes {
-            self.log_info("Working tree dirty; proceeding with quick save.");
-        }
-        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-        match manager.save(&format!("[quick] {}", timestamp)) {
-            Ok(result) => {
-                manager.update_last_save_time();
-                self.log_info(format!(
-                    "Quick save complete ({} - {})",
-                    result.short_oid, result.message
-                ));
-                self.refresh()?;
+        self.with_busy("Saving...", |s| {
+            let mut manager = SaveManager::new(Git2Core::open(&s.save_dir)?);
+            if s.status.has_uncommitted_changes {
+                s.log_info("Working tree dirty; proceeding with quick save.");
             }
-            Err(err) => self.log_error(format!("Quick save error: {}", err)),
-        }
-        Ok(())
+            let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+            match manager.save(&format!("[quick] {}", timestamp)) {
+                Ok(result) => {
+                    manager.update_last_save_time();
+                    s.log_info(format!(
+                        "Quick save complete ({} - {})",
+                        result.short_oid, result.message
+                    ));
+                    s.refresh()?;
+                }
+                Err(err) => s.log_error(format!("Quick save error: {}", err)),
+            }
+            Ok(())
+        })
     }
 
     fn perform_load(&mut self, short_id: &str, label: &str) -> Result<()> {
-        let mut manager = SaveManager::new(Git2Core::open(&self.save_dir)?);
-        match manager.load(short_id, false) {
-            Ok(()) => {
-                self.log_info(format!("Loaded {} ({})", short_id, label));
-                self.follow_current_route = true;
-                self.refresh()?;
+        self.with_busy("Loading save...", |s| {
+            let mut manager = SaveManager::new(Git2Core::open(&s.save_dir)?);
+            match manager.load(short_id, false) {
+                Ok(()) => {
+                    s.log_info(format!("Loaded {} ({})", short_id, label));
+                    s.follow_current_route = true;
+                    s.refresh()?;
+                }
+                Err(SaveError::SaveNotFound(_)) => {
+                    s.log_error("Selected save no longer exists.");
+                }
+                Err(err) => {
+                    s.log_error(format!("Load failed: {}", err));
+                }
             }
-            Err(SaveError::SaveNotFound(_)) => {
-                self.log_error("Selected save no longer exists.");
-            }
-            Err(err) => {
-                self.log_error(format!("Load failed: {}", err));
-            }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn perform_route_creation(&mut self, name: &str) -> Result<()> {
-        let mut manager = RouteManager::new(Git2Core::open(&self.save_dir)?);
-        match manager.switch_create_route(name) {
-            Ok(()) => {
-                self.log_info(format!("Created route '{}'", name));
-                self.follow_current_route = true;
-                self.refresh()?;
+        self.with_busy("Creating route...", |s| {
+            let mut manager = RouteManager::new(Git2Core::open(&s.save_dir)?);
+            match manager.switch_create_route(name) {
+                Ok(()) => {
+                    s.log_info(format!("Created route '{}'", name));
+                    s.follow_current_route = true;
+                    s.refresh()?;
+                }
+                Err(err) => {
+                    s.log_error(format!("Failed to create route '{}': {}", name, err));
+                }
             }
-            Err(err) => {
-                self.log_error(format!("Failed to create route '{}': {}", name, err));
-            }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn perform_route_switch(&mut self, name: &str) -> Result<()> {
-        let mut manager = RouteManager::new(Git2Core::open(&self.save_dir)?);
-        match manager.switch_route(name) {
-            Ok(()) => {
-                self.log_info(format!("Switched to route '{}'", name));
-                self.follow_current_route = true;
-                self.refresh()?;
+        self.with_busy("Switching route...", |s| {
+            let mut manager = RouteManager::new(Git2Core::open(&s.save_dir)?);
+            match manager.switch_route(name) {
+                Ok(()) => {
+                    s.log_info(format!("Switched to route '{}'", name));
+                    s.follow_current_route = true;
+                    s.refresh()?;
+                }
+                Err(err) => {
+                    s.log_error(format!("Failed to switch route '{}': {}", name, err));
+                }
             }
-            Err(err) => {
-                self.log_error(format!("Failed to switch route '{}': {}", name, err));
-            }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn activate_selection(&mut self) {
@@ -563,6 +573,16 @@ impl AppState {
                 name: route.name.clone(),
             },
         };
+    }
+
+    fn with_busy<F>(&mut self, message: &str, mut action: F) -> Result<()>
+    where
+        F: FnMut(&mut Self) -> Result<()>,
+    {
+        self.busy = Some(BusyIndicator::new(message));
+        let result = action(self);
+        self.busy = None;
+        result
     }
 }
 
@@ -598,6 +618,26 @@ impl UiLogEntry {
     }
 }
 
+struct BusyIndicator {
+    message: String,
+    started: Instant,
+}
+
+impl BusyIndicator {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            started: Instant::now(),
+        }
+    }
+
+    fn spinner(&self) -> char {
+        const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+        let idx = ((self.started.elapsed().as_millis() / 150) % FRAMES.len() as u128) as usize;
+        FRAMES[idx]
+    }
+}
+
 fn draw_ui(f: &mut Frame, app: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -612,8 +652,8 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
         )
         .split(f.size());
 
-    let header_text = format!(
-        "gitsave TUI · {} · 路线: {} · Autosave: {} ({}s) · 刷新:{:>3}s · {}",
+    let mut header_text = format!(
+        "gitsave TUI · {} · 路线: {} · Autosave: {} ({}s) · 刷新:{:>3}s",
         app.save_dir.display(),
         if app.status.current_route.is_empty() {
             "(unknown)"
@@ -622,11 +662,15 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
         },
         if app.autosave.enabled { "ON" } else { "OFF" },
         app.autosave.interval,
-        app.last_refresh.elapsed().as_secs(),
-        app.latest_notification()
-            .map(|n| format!("最近事件: {}", n.message))
-            .unwrap_or_else(|| "等待操作".to_string())
+        app.last_refresh.elapsed().as_secs()
     );
+    if let Some(busy) = &app.busy {
+        header_text.push_str(&format!("  [{}] {}", busy.spinner(), busy.message));
+    } else if let Some(note) = app.latest_notification() {
+        header_text.push_str(&format!("  最近事件: {}", note.message));
+    } else {
+        header_text.push_str("  等待操作");
+    }
     let header = Paragraph::new(header_text).style(Style::default().fg(Color::Cyan));
     f.render_widget(header, chunks[0]);
 
