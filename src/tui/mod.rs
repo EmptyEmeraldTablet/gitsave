@@ -25,7 +25,6 @@ use crate::manager::{AutoSaveConfig, ConfigManager, RouteManager, SaveManager};
 const AUTO_REFRESH_SECS: u64 = 10;
 const AUTO_SAVE_POLL_SECS: u64 = 1;
 const MAX_NOTIFICATION_LINES: usize = 4;
-const STATUS_POLL_SECS: u64 = 3;
 
 pub fn run(save_dir: &Path) -> Result<()> {
     // Preflight check before switching to alternate screen
@@ -64,14 +63,6 @@ pub fn run(save_dir: &Path) -> Result<()> {
 
         if app.last_refresh.elapsed() >= Duration::from_secs(AUTO_REFRESH_SECS) {
             app.refresh()?;
-        }
-
-        if let Err(err) = app.maybe_auto_save() {
-            app.log_error(format!("Auto-save failed: {}", err));
-        }
-
-        if let Err(err) = app.maybe_refresh_status() {
-            app.log_error(format!("Status refresh failed: {}", err));
         }
     }
 
@@ -119,6 +110,7 @@ struct AppState {
     save_dir: PathBuf,
     routes: Vec<RouteInfo>,
     route_index: usize,
+    all_history: Vec<SaveEntry>,
     history: Vec<SaveEntry>,
     history_index: usize,
     status: SaveStatus,
@@ -126,11 +118,9 @@ struct AppState {
     focus: Focus,
     last_refresh: Instant,
     last_auto_poll: Instant,
-    last_status_check: Instant,
     notifications: Vec<UiLogEntry>,
     mode: UiMode,
     follow_current_route: bool,
-    dirty_notice: Option<String>,
 }
 
 impl AppState {
@@ -139,6 +129,7 @@ impl AppState {
             save_dir,
             routes: Vec::new(),
             route_index: 0,
+            all_history: Vec::new(),
             history: Vec::new(),
             history_index: 0,
             status: SaveStatus {
@@ -151,11 +142,9 @@ impl AppState {
             focus: Focus::Routes,
             last_refresh: Instant::now(),
             last_auto_poll: Instant::now(),
-            last_status_check: Instant::now(),
             notifications: Vec::new(),
             mode: UiMode::Normal,
             follow_current_route: true,
-            dirty_notice: None,
         };
         state.log_info("TUI ready. Press r to refresh, q to quit.");
         state.refresh()?;
@@ -183,30 +172,12 @@ impl AppState {
         }
 
         let mut history = core.get_history()?;
-        if let Some(route) = self.current_route_name() {
-            history.retain(|entry| entry.route == route);
-        }
         history.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        self.history = history;
-        if let Some(current_save) = self.status.last_save.as_ref() {
-            if let Some(idx) = self
-                .history
-                .iter()
-                .position(|entry| entry.short_id == current_save.short_id)
-            {
-                self.history_index = idx;
-            }
-        } else if self.history_index >= self.history.len() && !self.history.is_empty() {
-            self.history_index = self.history.len() - 1;
-        }
-        if self.history.is_empty() {
-            self.history_index = 0;
-        }
+        self.all_history = history;
+        self.apply_history_filter();
 
         self.autosave = ConfigManager::new(&self.save_dir).load_auto_save_config();
         self.last_refresh = Instant::now();
-        self.last_status_check = Instant::now();
-        self.update_dirty_notice();
         Ok(())
     }
 
@@ -216,13 +187,44 @@ impl AppState {
             .map(|route| route.name.clone())
     }
 
+    fn apply_history_filter(&mut self) {
+        let mut filtered: Vec<SaveEntry> = if let Some(route) = self.current_route_name() {
+            self.all_history
+                .iter()
+                .filter(|entry| entry.route == route)
+                .cloned()
+                .collect()
+        } else {
+            self.all_history.clone()
+        };
+
+        if let Some(current_save) = self.status.last_save.as_ref() {
+            if let Some(idx) = filtered
+                .iter()
+                .position(|entry| entry.short_id == current_save.short_id)
+            {
+                self.history_index = idx;
+            } else if self.history_index >= filtered.len() && !filtered.is_empty() {
+                self.history_index = filtered.len() - 1;
+            }
+        } else if self.history_index >= filtered.len() && !filtered.is_empty() {
+            self.history_index = filtered.len() - 1;
+        }
+
+        if filtered.is_empty() {
+            self.history_index = 0;
+        }
+
+        self.history = filtered;
+    }
+
     fn move_down(&mut self) {
         match self.focus {
             Focus::Routes => {
                 if !self.routes.is_empty() && self.route_index + 1 < self.routes.len() {
                     self.route_index += 1;
                     self.follow_current_route = false;
-                    let _ = self.refresh();
+                    self.apply_history_filter();
                 }
             }
             Focus::History => {
@@ -239,7 +241,7 @@ impl AppState {
                 if self.route_index > 0 {
                     self.route_index -= 1;
                     self.follow_current_route = false;
-                    let _ = self.refresh();
+                    self.apply_history_filter();
                 }
             }
             Focus::History => {
@@ -284,6 +286,11 @@ impl AppState {
                         self.request_load_selected();
                     }
                     KeyCode::Char('c') => self.start_route_prompt(),
+                    KeyCode::Char('a') => {
+                        if let Err(err) = self.maybe_auto_save(true) {
+                            self.log_error(format!("Auto-save failed: {}", err));
+                        }
+                    }
                     KeyCode::Enter => self.activate_selection(),
                     KeyCode::Tab => self.toggle_focus(),
                     KeyCode::Down | KeyCode::Char('j') => self.move_down(),
@@ -337,17 +344,24 @@ impl AppState {
         }
     }
 
-    fn maybe_auto_save(&mut self) -> Result<()> {
+    fn maybe_auto_save(&mut self, force_check: bool) -> Result<()> {
         if !self.autosave.enabled {
+            if force_check {
+                self.log_info("Auto-save disabled. Use `gitsave autosave --enable` to turn it on.");
+            }
             return Ok(());
         }
-        if self.last_auto_poll.elapsed() < Duration::from_secs(AUTO_SAVE_POLL_SECS) {
+        if !force_check && self.last_auto_poll.elapsed() < Duration::from_secs(AUTO_SAVE_POLL_SECS)
+        {
             return Ok(());
         }
         self.last_auto_poll = Instant::now();
 
         let mut manager = SaveManager::new(Git2Core::open(&self.save_dir)?);
         if !manager.should_auto_save() {
+            if force_check {
+                self.log_info("Auto-save interval not reached yet.");
+            }
             return Ok(());
         }
 
@@ -366,40 +380,6 @@ impl AppState {
             }
         }
         Ok(())
-    }
-
-    fn maybe_refresh_status(&mut self) -> Result<()> {
-        if self.last_status_check.elapsed() < Duration::from_secs(STATUS_POLL_SECS) {
-            return Ok(());
-        }
-        let core = Git2Core::open(&self.save_dir)?;
-        self.status = core.get_status()?;
-        self.last_status_check = Instant::now();
-        self.update_dirty_notice();
-        Ok(())
-    }
-
-    fn update_dirty_notice(&mut self) {
-        if self.status.has_uncommitted_changes {
-            let new_files = self
-                .status
-                .pending_changes
-                .iter()
-                .filter(|change| matches!(change.status, crate::core::ChangeStatus::Added))
-                .count();
-            let total = self.status.pending_changes.len();
-            let message = format!(
-                "Uncommitted files detected: {} total ({} new). Saving or switching routes will discard them.",
-                total, new_files
-            );
-            if self.dirty_notice.as_deref() != Some(message.as_str()) {
-                self.dirty_notice = Some(message.clone());
-                self.log_error(message);
-            }
-        } else if self.dirty_notice.is_some() {
-            self.dirty_notice = None;
-            self.log_info("Working tree clean again.");
-        }
     }
 
     fn log_info(&mut self, message: impl Into<String>) {
@@ -894,18 +874,6 @@ fn draw_notifications(f: &mut Frame, area: Rect, app: &AppState) {
             })
             .collect()
     };
-
-    if let Some(alert) = &app.dirty_notice {
-        lines.insert(
-            0,
-            Line::styled(
-                format!("!! {}", alert),
-                Style::default()
-                    .fg(Color::LightRed)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        );
-    }
 
     match &app.mode {
         UiMode::CreateRoute { buffer } => {
