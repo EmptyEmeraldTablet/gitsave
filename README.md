@@ -44,6 +44,11 @@ TUI 是首选交互方式，适合频繁保存/回滚场景：
 
 完整 TUI 说明请见 [docs/TUI.md](docs/TUI.md)。
 
+## 常见场景
+
+如果你需要快速定位玩法路径，或处理“坏结局/误操作/频繁试错”等情景，建议先看用例清单：  
+[docs/USE_CASES.md](docs/USE_CASES.md)
+
 ## 文档索引
 
 - 安装与环境配置：[docs/INSTALL.md](docs/INSTALL.md)
@@ -51,6 +56,7 @@ TUI 是首选交互方式，适合频繁保存/回滚场景：
 - TUI 交互说明：[docs/TUI.md](docs/TUI.md)
 - 测试说明：[docs/TESTING.md](docs/TESTING.md)
 - 常见问题与注意事项：[docs/FAQ.md](docs/FAQ.md)
+- 常见使用场景：[docs/USE_CASES.md](docs/USE_CASES.md)
 
 ## 规划中功能
 
