@@ -20,6 +20,9 @@ pub enum Commands {
     Init {
         #[arg(default_value = ".")]
         path: PathBuf,
+
+        #[arg(short, long, action = clap::ArgAction::SetTrue)]
+        force: bool,
     },
 
     #[command(about = "Save current game state")]

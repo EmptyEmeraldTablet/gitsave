@@ -22,7 +22,27 @@ fn get_save_dir(cli: &Cli) -> PathBuf {
     }
 }
 
-fn handle_init(save_dir: &Path) -> Result<()> {
+fn handle_init(save_dir: &Path, force: bool) -> Result<()> {
+    if let Ok(existing) = Git2Core::open(save_dir) {
+        let config_path = existing.repo().path().join("gitsave.toml");
+        if config_path.exists() {
+            if !force {
+                eprintln!(
+                    "[ERROR] gitsave repository already exists at {}. Use --force to re-init.",
+                    existing.workdir().display()
+                );
+                std::process::exit(1);
+            }
+        } else {
+            eprintln!(
+                "[ERROR] A non-gitsave Git repository exists at {}. Refusing to init here.",
+                existing.workdir().display()
+            );
+            eprintln!("Tip: choose a dedicated save folder or remove the existing .git directory.");
+            std::process::exit(1);
+        }
+    }
+
     let core = Git2Core::init(save_dir).context("Failed to init repository")?;
     let repo = core.repo();
     let config_content = r#"# gitsave configuration
@@ -482,8 +502,8 @@ fn main() {
     let save_dir = get_save_dir(&cli);
 
     match &cli.command {
-        Commands::Init { path } => {
-            if let Err(e) = handle_init(&path) {
+        Commands::Init { path, force } => {
+            if let Err(e) = handle_init(&path, *force) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }

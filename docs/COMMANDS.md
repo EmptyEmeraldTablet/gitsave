@@ -10,6 +10,9 @@
 gitsave init [PATH]
 ```
 
+选项：
+- `-f, --force`：强制在已有 gitsave 仓库中重新初始化（谨慎使用）
+
 示例：
 
 ```bash
