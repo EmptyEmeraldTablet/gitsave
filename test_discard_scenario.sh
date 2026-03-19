@@ -64,7 +64,7 @@ git status --short
 
 echo
 echo "== discard via gitsave load --force $LATEST_ID =="
-printf "y\n" | "$GITSAVE_BIN" load --force "$LATEST_ID"
+printf "y\n" | "$GITSAVE_BIN" load --force --route rollback_latest "$LATEST_ID"
 
 "$GITSAVE_BIN" status
 git status --short
@@ -72,7 +72,7 @@ ls -la save.dat history/1773902383.run 2>/dev/null || true
 
 echo
 echo "== load previous commit to restore =="
-printf "y\n" | "$GITSAVE_BIN" load --force "$PREV_ID"
+printf "y\n" | "$GITSAVE_BIN" load --force --route rollback_prev "$PREV_ID"
 
 "$GITSAVE_BIN" status
 git status --short

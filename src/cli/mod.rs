@@ -34,7 +34,7 @@ pub enum Commands {
         desc: String,
     },
 
-    #[command(about = "Load a saved game state")]
+    #[command(about = "Roll back to a saved game state (creates a new route)")]
     Load {
         #[arg(short, long)]
         list: bool,
@@ -47,6 +47,9 @@ pub enum Commands {
 
         #[arg(short, long, value_name = "TAG")]
         tag: Option<String>,
+
+        #[arg(short, long, value_name = "ROUTE")]
+        route: Option<String>,
 
         identifier: Option<String>,
     },

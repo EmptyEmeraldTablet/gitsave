@@ -163,6 +163,7 @@ fn handle_load(
     preview: bool,
     force: bool,
     tag: &Option<String>,
+    route: &Option<String>,
     identifier: &Option<String>,
 ) -> Result<()> {
     let core = Git2Core::open(save_dir).context("Failed to open repository")?;
@@ -184,30 +185,36 @@ fn handle_load(
 
     if let Some(tag_name) = tag {
         if preview {
-            println!("Would load tag: {}", tag_name);
+            println!("Would roll back to tag: {}", tag_name);
             return Ok(());
         }
+
+        let route_name = resolve_route_name(route, &format!("roll back to tag {}", tag_name))?;
+        let Some(route_name) = route_name else {
+            println!("Cancelled.");
+            return Ok(());
+        };
 
         let status = manager.get_status()?;
         if status.has_uncommitted_changes {
             if force {
                 if !confirm_discard_changes(
-                    "Uncommitted changes detected. Loading will discard them. Proceed?",
+                    "Uncommitted changes detected. Rolling back will discard them. Proceed?",
                 )? {
                     println!("Cancelled.");
                     return Ok(());
                 }
-                manager.discard_changes()?;
-            } else if !ensure_clean_for_action(&mut manager, "loading tag")? {
+            } else if !ensure_clean_for_action(&mut manager, "rolling back to tag")? {
                 println!("Cancelled.");
                 return Ok(());
             }
         }
 
-        match manager.load_by_tag(tag_name, true) {
-            Ok(()) => println!("Loaded tag: {}", tag_name),
+        let mut core = manager.into_core();
+        match core.switch_create_route_at_tag(tag_name, &route_name) {
+            Ok(()) => println!("Rolled back tag {} on route {}", tag_name, route_name),
             Err(e) => {
-                eprintln!("[ERROR] Failed to load tag '{}': {}", tag_name, e);
+                eprintln!("[ERROR] Failed to roll back tag '{}': {}", tag_name, e);
                 std::process::exit(1);
             }
         }
@@ -216,28 +223,33 @@ fn handle_load(
 
     if let Some(id) = identifier {
         if preview {
-            println!("Would load save: {}", id);
+            println!("Would roll back to save: {}", id);
             return Ok(());
         }
+
+        let route_name = resolve_route_name(route, &format!("roll back to save {}", id))?;
+        let Some(route_name) = route_name else {
+            println!("Cancelled.");
+            return Ok(());
+        };
 
         let status = manager.get_status()?;
         if status.has_uncommitted_changes {
             if force {
                 if !confirm_discard_changes(
-                    "Uncommitted changes detected. Loading will discard them. Proceed?",
+                    "Uncommitted changes detected. Rolling back will discard them. Proceed?",
                 )? {
                     println!("Cancelled.");
                     return Ok(());
                 }
-                manager.discard_changes()?;
-            } else if !ensure_clean_for_action(&mut manager, "loading save")? {
+            } else if !ensure_clean_for_action(&mut manager, "rolling back to save")? {
                 println!("Cancelled.");
                 return Ok(());
             }
         }
 
-        match manager.into_core().checkout(id) {
-            Ok(()) => println!("Loaded save: {}", id),
+        match manager.into_core().switch_create_route_at(id, &route_name) {
+            Ok(()) => println!("Rolled back to save {} on route {}", id, route_name),
             Err(SaveError::SaveNotFound(target)) => {
                 let all_saves = SaveManager::new(Git2Core::open(save_dir)?).list_saves()?;
                 eprintln!("[ERROR] Save not found: {}", target);
@@ -527,6 +539,49 @@ fn prompt_unstable_decision(attempts: u32) -> Result<UnstableDecision> {
     }
 }
 
+fn is_valid_route_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/'))
+}
+
+fn resolve_route_name(route: &Option<String>, action: &str) -> Result<Option<String>> {
+    if let Some(name) = route {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            eprintln!("[ERROR] Route name cannot be empty.");
+            std::process::exit(1);
+        }
+        if !is_valid_route_name(trimmed) {
+            eprintln!("[ERROR] Invalid route name '{}'.", trimmed);
+            eprintln!("Allowed: letters, digits, '-', '_', '/'");
+            std::process::exit(1);
+        }
+        return Ok(Some(trimmed.to_string()));
+    }
+
+    loop {
+        eprint!(
+            "[INPUT] Enter new route name to {} (empty to cancel): ",
+            action
+        );
+        io::stderr().flush().ok();
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read input")?;
+        let name = input.trim();
+        if name.is_empty() {
+            return Ok(None);
+        }
+        if is_valid_route_name(name) {
+            return Ok(Some(name.to_string()));
+        }
+        eprintln!("Route name may contain letters, digits, '-', '_', '/'.");
+    }
+}
+
 fn perform_stable_save_interactive(
     manager: &mut SaveManager,
     message: &str,
@@ -635,9 +690,12 @@ fn main() {
             preview,
             force,
             tag,
+            route,
             identifier,
         } => {
-            if let Err(e) = handle_load(&save_dir, *list, *preview, *force, tag, identifier) {
+            if let Err(e) =
+                handle_load(&save_dir, *list, *preview, *force, tag, route, identifier)
+            {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }

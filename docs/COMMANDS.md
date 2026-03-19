@@ -42,7 +42,7 @@ gitsave save "击败第一个Boss"
 
 ## load
 
-加载存档。支持列出、预览、强制回滚或通过标签回滚。
+回滚到存档。回滚时会在目标提交上创建并切换到新路线。
 
 ```bash
 gitsave load [OPTIONS] [IDENTIFIER]
@@ -51,19 +51,21 @@ gitsave load [OPTIONS] [IDENTIFIER]
 - `-l, --list`：列出所有存档
 - `-p, --preview`：预览模式，不实际回滚
 - `-f, --force`：强制回滚（丢弃未保存更改）
-- `-t, --tag TAG`：通过标签加载
+- `-t, --tag TAG`：通过标签回滚
+- `-r, --route ROUTE`：回滚后创建并切换的新路线名（不提供则提示输入）
 - `IDENTIFIER`：短哈希或存档描述
 
 示例：
 
 ```bash
 gitsave load --list
-gitsave load a1b2c3d
-gitsave load "重要选择"
-gitsave load --tag "最终存档"
+gitsave load --route chapter1 a1b2c3d
+gitsave load --route "重要选择-分支" "重要选择"
+gitsave load --route ending-a --tag "最终存档"
 ```
 
 行为：
+- 回滚总是创建新路线并切换过去，原路线不受影响。
 - 脏工作区下默认拒绝回滚，需显式选择“保存/丢弃/取消”后继续。
 
 ## status

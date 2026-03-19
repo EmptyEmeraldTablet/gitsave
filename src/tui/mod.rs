@@ -132,6 +132,10 @@ enum UiMode {
         buffer: String,
         mode: SaveMode,
     },
+    RollbackPrompt {
+        buffer: String,
+        action: PendingAction,
+    },
     CreateRoute {
         buffer: String,
         switch: bool,
@@ -152,7 +156,7 @@ enum UiMode {
 
 #[derive(Clone)]
 enum PendingAction {
-    LoadSave {
+    RollbackSave {
         short_id: String,
         label: String,
         force: bool,
@@ -421,11 +425,11 @@ impl AppState {
                         handled = true;
                     }
                     KeyCode::Char('l') => {
-                        self.request_load_selected(false);
+                        self.request_rollback_selected(false);
                         handled = true;
                     }
                     KeyCode::Char('L') => {
-                        self.request_load_selected(true);
+                        self.request_rollback_selected(true);
                         handled = true;
                     }
                     KeyCode::Char('c') => {
@@ -497,6 +501,35 @@ impl AppState {
                     KeyCode::Char(ch) => {
                         buffer.push(ch);
                         handled = true;
+                    }
+                    _ => {}
+                }
+                if handled {
+                    self.mark_dirty();
+                }
+                Ok(false)
+            }
+            UiMode::RollbackPrompt { buffer, .. } => {
+                let mut handled = false;
+                match code {
+                    KeyCode::Esc => {
+                        self.log_info("Rollback cancelled");
+                        self.mode = UiMode::Normal;
+                        handled = true;
+                    }
+                    KeyCode::Enter => {
+                        self.confirm_rollback_prompt()?;
+                        handled = true;
+                    }
+                    KeyCode::Backspace => {
+                        buffer.pop();
+                        handled = true;
+                    }
+                    KeyCode::Char(ch) => {
+                        if is_valid_route_char(ch) {
+                            buffer.push(ch);
+                            handled = true;
+                        }
                     }
                     _ => {}
                 }
@@ -689,6 +722,36 @@ impl AppState {
         }
     }
 
+    fn start_rollback_prompt(&mut self, action: PendingAction) -> Result<()> {
+        self.mode = UiMode::RollbackPrompt {
+            buffer: String::new(),
+            action,
+        };
+        Ok(())
+    }
+
+    fn confirm_rollback_prompt(&mut self) -> Result<()> {
+        let (route_name, action) = match &self.mode {
+            UiMode::RollbackPrompt { buffer, action } => (buffer.trim().to_string(), action.clone()),
+            _ => return Ok(()),
+        };
+        self.mode = UiMode::Normal;
+
+        if route_name.is_empty() {
+            self.log_error("Route name required for rollback.");
+            return Ok(());
+        }
+
+        match action {
+            PendingAction::RollbackSave {
+                short_id,
+                label,
+                force,
+            } => self.perform_rollback(&short_id, &label, &route_name, force),
+            _ => Ok(()),
+        }
+    }
+
     fn save_then_action(&mut self, action: PendingAction) -> Result<()> {
         self.refresh_status_only()?;
         if !self.status.has_uncommitted_changes {
@@ -726,15 +789,15 @@ impl AppState {
         Ok(())
     }
 
-    fn request_load_selected(&mut self, force: bool) {
+    fn request_rollback_selected(&mut self, force: bool) {
         let entry = match self.history.get(self.history_index) {
             Some(entry) => entry.clone(),
             None => {
-                self.log_error("No save selected to load.");
+                self.log_error("No save selected to roll back.");
                 return;
             }
         };
-        let action = PendingAction::LoadSave {
+        let action = PendingAction::RollbackSave {
             short_id: entry.short_id.clone(),
             label: entry.message.clone(),
             force,
@@ -742,7 +805,7 @@ impl AppState {
         if force {
             self.mode = UiMode::ConfirmAction {
                 prompt: format!(
-                    "Force load save {} ({})? Unsaved changes will be discarded.",
+                    "Force roll back to save {} ({})? Unsaved changes will be discarded. A new route will be created.",
                     entry.short_id, entry.message
                 ),
                 action,
@@ -750,7 +813,10 @@ impl AppState {
             return;
         }
 
-        let prompt = format!("Load save {} ({})?", entry.short_id, entry.message);
+        let prompt = format!(
+            "Roll back to save {} ({})? A new route will be created.",
+            entry.short_id, entry.message
+        );
         if self.status.has_uncommitted_changes {
             self.mode = UiMode::ResolveDirty { prompt, action };
         } else {
@@ -842,11 +908,7 @@ impl AppState {
 
     fn execute_pending_action(&mut self, action: PendingAction) -> Result<()> {
         match action {
-            PendingAction::LoadSave {
-                short_id,
-                label,
-                force,
-            } => self.perform_load(&short_id, &label, force),
+            PendingAction::RollbackSave { .. } => self.start_rollback_prompt(action),
             PendingAction::CreateRoute { name, switch } => {
                 self.perform_route_creation(&name, switch)
             }
@@ -935,42 +997,53 @@ impl AppState {
         Ok(())
     }
 
-    fn perform_load(&mut self, short_id: &str, label: &str, force: bool) -> Result<()> {
-        let banner = if force { "Force loading save..." } else { "Loading save..." };
+    fn perform_rollback(
+        &mut self,
+        short_id: &str,
+        label: &str,
+        route_name: &str,
+        force: bool,
+    ) -> Result<()> {
+        let banner = if force {
+            "Force rolling back..."
+        } else {
+            "Rolling back..."
+        };
         self.with_busy(banner, |s| {
-            if force {
-                let mut core = Git2Core::open(&s.save_dir)?;
-                match core.checkout(short_id) {
-                    Ok(()) => {
-                        s.log_info(format!("Loaded {} ({})", short_id, label));
-                        s.follow_current_route = true;
-                        s.refresh()?;
-                    }
-                    Err(SaveError::SaveNotFound(_)) => {
-                        s.log_error("Selected save no longer exists.");
-                    }
-                    Err(err) => {
-                        s.log_error(format!("Load failed: {}", err));
-                    }
-                }
+            let manager = SaveManager::new(Git2Core::open(&s.save_dir)?);
+            let status = manager.get_status()?;
+            if status.has_uncommitted_changes && !force {
+                s.log_error("Working tree dirty; save or discard changes first.");
                 return Ok(());
             }
 
-            let mut manager = SaveManager::new(Git2Core::open(&s.save_dir)?);
-            match manager.load(short_id, false) {
+            let mut core = manager.into_core();
+            let routes = match core.list_routes() {
+                Ok(routes) => routes,
+                Err(err) => {
+                    s.log_error(format!("Failed to list routes: {}", err));
+                    return Ok(());
+                }
+            };
+            if routes.iter().any(|route| route.name == route_name) {
+                s.log_error(format!("Route '{}' already exists.", route_name));
+                return Ok(());
+            }
+
+            match core.switch_create_route_at(short_id, route_name) {
                 Ok(()) => {
-                    s.log_info(format!("Loaded {} ({})", short_id, label));
+                    s.log_info(format!(
+                        "Rolled back to {} ({}) on route '{}'",
+                        short_id, label, route_name
+                    ));
                     s.follow_current_route = true;
                     s.refresh()?;
-                }
-                Err(SaveError::UncommittedChanges) => {
-                    s.log_error("Working tree dirty; save or discard changes first.");
                 }
                 Err(SaveError::SaveNotFound(_)) => {
                     s.log_error("Selected save no longer exists.");
                 }
                 Err(err) => {
-                    s.log_error(format!("Load failed: {}", err));
+                    s.log_error(format!("Rollback failed: {}", err));
                 }
             }
             Ok(())
@@ -1059,7 +1132,7 @@ impl AppState {
     fn activate_selection(&mut self) {
         match self.focus {
             Focus::Routes => self.request_route_switch(false),
-            Focus::History => self.request_load_selected(false),
+            Focus::History => self.request_rollback_selected(false),
         }
     }
 
@@ -1091,8 +1164,8 @@ impl AppState {
 
     fn guard_message_for_action(&self, action: &PendingAction) -> String {
         let detail = match action {
-            PendingAction::LoadSave { short_id, .. } => {
-                format!("before load {}", short_id)
+            PendingAction::RollbackSave { short_id, .. } => {
+                format!("before rollback {}", short_id)
             }
             PendingAction::CreateRoute { name, switch } => {
                 if *switch {
@@ -1225,7 +1298,7 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
         Span::styled("s/S", Style::default().fg(Color::Yellow)),
         Span::raw(": save  "),
         Span::styled("l/L", Style::default().fg(Color::Yellow)),
-        Span::raw(": load  "),
+        Span::raw(": rollback  "),
         Span::styled("c/C", Style::default().fg(Color::Yellow)),
         Span::raw(": create  "),
         Span::styled("x/X", Style::default().fg(Color::Yellow)),
@@ -1535,6 +1608,25 @@ impl ModalOverlay {
                 ];
                 Some(Self {
                     title: "Save Not Stable".to_string(),
+                    lines,
+                })
+            }
+            UiMode::RollbackPrompt { buffer, action } => {
+                let detail = match action {
+                    PendingAction::RollbackSave { short_id, label, .. } => {
+                        format!("Rollback to {} ({})", short_id, label)
+                    }
+                    _ => "Rollback".to_string(),
+                };
+                let lines = vec![
+                    Line::from(detail),
+                    Line::from("Enter a new route name for rollback."),
+                    Line::from(format!("> {}", buffer)),
+                    Line::from("Allowed: letters, digits, -, _, /."),
+                    Line::from("Enter = confirm · Esc = cancel"),
+                ];
+                Some(Self {
+                    title: "Rollback".to_string(),
                     lines,
                 })
             }

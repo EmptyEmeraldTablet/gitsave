@@ -348,6 +348,22 @@ impl Git2Core {
         Ok(())
     }
 
+    pub fn switch_create_route_at(&mut self, target: &str, name: &str) -> Result<()> {
+        let oid = {
+            let commit = self.find_commit(target)?;
+            commit.id()
+        };
+        self.switch_create_route_at_oid(name, oid)
+    }
+
+    pub fn switch_create_route_at_tag(&mut self, tag_name: &str, name: &str) -> Result<()> {
+        let oid = {
+            let commit = self.get_tag_commit(tag_name)?;
+            commit.id()
+        };
+        self.switch_create_route_at_oid(name, oid)
+    }
+
     pub fn switch_create_route(&mut self, name: &str) -> Result<()> {
         self.create_route(name)?;
         self.switch_route(name)?;
@@ -425,6 +441,31 @@ impl Git2Core {
 
     pub fn delete_tag(&self, name: &str) -> Result<()> {
         self.repo.tag_delete(name).map_err(SaveError::Repository)?;
+        Ok(())
+    }
+
+    fn switch_create_route_at_oid(&mut self, name: &str, oid: Oid) -> Result<()> {
+        let commit = self.repo.find_commit(oid).map_err(SaveError::Repository)?;
+        self.repo
+            .branch(name, &commit, false)
+            .map_err(SaveError::Repository)?;
+        self.repo
+            .set_head(&format!("refs/heads/{}", name))
+            .map_err(SaveError::Repository)?;
+
+        let mut checkout_opts = git2::build::CheckoutBuilder::new();
+        checkout_opts
+            .force()
+            .remove_untracked(true)
+            .remove_ignored(true);
+
+        self.repo
+            .reset(commit.as_object(), ResetType::Hard, Some(&mut checkout_opts))
+            .map_err(SaveError::Repository)?;
+        self.repo
+            .checkout_head(Some(&mut checkout_opts))
+            .map_err(SaveError::Repository)?;
+
         Ok(())
     }
 
