@@ -125,6 +125,9 @@ impl Git2Core {
         self.repo
             .reset(&commit.into_object(), ResetType::Hard, Some(&mut checkout_opts))
             .map_err(SaveError::Repository)?;
+        self.repo
+            .checkout_head(Some(&mut checkout_opts))
+            .map_err(SaveError::Repository)?;
 
         Ok(())
     }
@@ -250,7 +253,7 @@ impl Git2Core {
             let path = delta.new_file().path();
             if let Some(p) = path {
                 let status = match delta.status() {
-                    git2::Delta::Added => ChangeStatus::Added,
+                    git2::Delta::Added | git2::Delta::Untracked => ChangeStatus::Added,
                     git2::Delta::Modified => ChangeStatus::Modified,
                     git2::Delta::Deleted => ChangeStatus::Deleted,
                     _ => ChangeStatus::Modified,
