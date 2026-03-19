@@ -128,6 +128,10 @@ impl Focus {
 
 enum UiMode {
     Normal,
+    SavePrompt {
+        buffer: String,
+        mode: SaveMode,
+    },
     CreateRoute {
         buffer: String,
         switch: bool,
@@ -170,7 +174,7 @@ struct SaveRequest {
     after: Option<PendingAction>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum SaveMode {
     Stable,
     Force,
@@ -409,11 +413,11 @@ impl AppState {
                         handled = true;
                     }
                     KeyCode::Char('s') => {
-                        self.start_save(SaveMode::Stable)?;
+                        self.start_save_prompt(SaveMode::Stable)?;
                         handled = true;
                     }
                     KeyCode::Char('S') => {
-                        self.start_save(SaveMode::Force)?;
+                        self.start_save_prompt(SaveMode::Force)?;
                         handled = true;
                     }
                     KeyCode::Char('l') => {
@@ -466,6 +470,32 @@ impl AppState {
                     }
                     KeyCode::PageUp => {
                         self.page_up();
+                        handled = true;
+                    }
+                    _ => {}
+                }
+                if handled {
+                    self.mark_dirty();
+                }
+                Ok(false)
+            }
+            UiMode::SavePrompt { buffer, .. } => {
+                let mut handled = false;
+                match code {
+                    KeyCode::Esc => {
+                        self.mode = UiMode::Normal;
+                        handled = true;
+                    }
+                    KeyCode::Enter => {
+                        self.confirm_save_prompt()?;
+                        handled = true;
+                    }
+                    KeyCode::Backspace => {
+                        buffer.pop();
+                        handled = true;
+                    }
+                    KeyCode::Char(ch) => {
+                        buffer.push(ch);
                         handled = true;
                     }
                     _ => {}
@@ -625,8 +655,30 @@ impl AppState {
         self.notifications.last()
     }
 
-    fn start_save(&mut self, mode: SaveMode) -> Result<()> {
-        let message = self.save_message_for_mode(mode);
+    fn start_save_prompt(&mut self, mode: SaveMode) -> Result<()> {
+        self.refresh_status_only()?;
+        if mode == SaveMode::Stable && !self.status.has_uncommitted_changes {
+            self.log_info("Working tree clean; no save needed. Use S to force a snapshot.");
+            return Ok(());
+        }
+        self.mode = UiMode::SavePrompt {
+            buffer: String::new(),
+            mode,
+        };
+        Ok(())
+    }
+
+    fn confirm_save_prompt(&mut self) -> Result<()> {
+        let (message, mode) = match &self.mode {
+            UiMode::SavePrompt { buffer, mode } => (buffer.trim().to_string(), *mode),
+            _ => return Ok(()),
+        };
+        self.mode = UiMode::Normal;
+        let message = if message.is_empty() {
+            self.save_message_for_mode(mode)
+        } else {
+            message
+        };
         let request = SaveRequest {
             message,
             after: None,
@@ -638,6 +690,11 @@ impl AppState {
     }
 
     fn save_then_action(&mut self, action: PendingAction) -> Result<()> {
+        self.refresh_status_only()?;
+        if !self.status.has_uncommitted_changes {
+            self.log_info("Working tree clean; skipping save.");
+            return self.execute_pending_action(action);
+        }
         let request = SaveRequest {
             message: self.guard_message_for_action(&action),
             after: Some(action),
@@ -1018,6 +1075,12 @@ impl AppState {
         result
     }
 
+    fn refresh_status_only(&mut self) -> Result<()> {
+        let core = Git2Core::open(&self.save_dir)?;
+        self.status = core.get_status()?;
+        Ok(())
+    }
+
     fn save_message_for_mode(&self, mode: SaveMode) -> String {
         let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
         match mode {
@@ -1132,7 +1195,16 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
     } else {
         header_text.push_str("  等待操作");
     }
-    let header = Paragraph::new(header_text).style(Style::default().fg(Color::Cyan));
+    let header_style = if app.busy.is_some() {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if app.latest_notification().map(|note| note.is_error).unwrap_or(false) {
+        Style::default().fg(Color::LightRed)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    let header = Paragraph::new(header_text).style(header_style);
     f.render_widget(header, chunks[0]);
 
     let body_chunks = Layout::default()
@@ -1463,6 +1535,21 @@ impl ModalOverlay {
                 ];
                 Some(Self {
                     title: "Save Not Stable".to_string(),
+                    lines,
+                })
+            }
+            UiMode::SavePrompt { buffer, mode } => {
+                let title = match mode {
+                    SaveMode::Stable => "Quick Save",
+                    SaveMode::Force => "Force Save",
+                };
+                let lines = vec![
+                    Line::from("Enter a save message (optional)."),
+                    Line::from(format!("> {}", buffer)),
+                    Line::from("Enter = save · Esc = cancel · Empty = auto message"),
+                ];
+                Some(Self {
+                    title: title.to_string(),
                     lines,
                 })
             }
