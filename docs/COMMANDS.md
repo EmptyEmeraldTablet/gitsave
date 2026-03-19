@@ -30,6 +30,10 @@ gitsave save [-m MESSAGE] [DESC]
 - `-m, --message`：指定保存描述
 - `DESC`：可选的描述（与 `-m` 二选一即可）
 
+规划行为：
+- 保存前将加入“存档稳定性检测”，避免保存到未完成写入的存档。
+- 当检测到存档仍在变化时，将提示用户选择“强制保存 / 稍后再试 / 取消”。
+
 示例：
 
 ```bash
@@ -58,6 +62,9 @@ gitsave load a1b2c3d
 gitsave load "重要选择"
 gitsave load --tag "最终存档"
 ```
+
+规划行为：
+- 脏工作区下默认拒绝回滚，需显式选择“保存/丢弃/取消”后继续。
 
 ## status
 
@@ -107,6 +114,9 @@ gitsave route delete <NAME>
 gitsave route rename <OLD> <NEW>
 ```
 
+规划行为：
+- `route create/switch` 在工作区脏时默认拒绝，需要显式确认保存或丢弃更改。
+
 ## tag
 
 对关键存档打标。
@@ -145,11 +155,14 @@ gitsave config [--set KEY=VALUE]
 
 ## autosave
 
-自动保存配置（默认关闭）。
+自动保存配置（默认关闭，自动保存暂不实现）。
 
 ```bash
 gitsave autosave [OPTIONS]
 ```
+
+说明：
+- 当前仅保留配置入口与状态展示，不会自动触发保存任务。
 
 - `--enable`：启用
 - `--disable`：禁用

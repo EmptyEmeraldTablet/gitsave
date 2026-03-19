@@ -1,97 +1,49 @@
 # Gitsave 开发文档
 
-## 自动保存功能设计
+## 当前决策
 
-### 当前实现
+- **自动保存暂不实现**：仅保留配置入口与 UI 占位，不触发后台保存任务。
+- **自动分支检测暂不实现**：不再根据回滚历史自动派生路线，分支由玩家手动创建与切换。
+- **保存安全优先**：引入“存档稳定性检测”，避免快速保存抓到未完成写入的存档。
 
-基于时间间隔的自动保存配置，存储在 `gitsave.toml` 中：
+## 存档稳定性检测（规划）
 
-```toml
-[auto_save]
-enabled = false
-interval = 300      # 秒
-max_count = 10
-```
+目标：保存前确认存档文件已经稳定，减少“保存了旧数据/半写入数据”的概率。
 
-### 待实现：基于变化检测的自动保存
+建议流程：
 
-#### 设计背景
+1. 扫描存档目录文件（应用 ignore 规则），记录 `size + mtime`。
+2. 等待稳定窗口（例如 1~2 秒）后再次扫描。
+3. 若两次结果一致，认为稳定；否则最多重试 N 次。
+4. 若仍不稳定，提示用户选择：
+   - `强制保存`：跳过稳定检测直接保存；
+   - `稍后再试`：退出保存流程；
+   - `取消`：放弃本次保存。
+5. 稳定后执行 `git add` + `git commit`。
 
-当游戏存档发生修改时自动保存，无需等待时间间隔。特别是处理提交回退场景。
+> 备注：稳定检测应该是保存流程的一部分，TUI/CLI 共享同一套判断逻辑。
 
-#### 核心逻辑
+## 脏工作区保护（规划）
 
-```
-1. 检查冷却时间（上次保存 < 10秒则退出）
-2. 检查是否有未提交更改（git status --porcelain），没有则退出
-3. git add .           # 暂存所有更改
-4. git stash push -m "autosave: <timestamp>"
-5. 获取 HEAD 哈希和当前分支名
-6. 判断 HEAD 是否在当前分支尖端：
-   - 在 → 目标分支 = 当前分支
-   - 不在 → 创建新分支（autosave-YYYYMMDD-HHMMSS）
-7. git switch 目标分支
-8. git stash pop
-   - 冲突 → git stash drop，退出（等待下次检测）
-   - 成功 → 继续第 9 步
-9. git add .           # 重新暂存
-10. git commit -m "autosave: YYYY-MM-DD HH:MM:SS"
-11. 更新冷却时间（记录上次保存时间戳）
-```
+目标：避免玩家在未保存的情况下误触“回滚/切换路线/创建路线”造成最新存档丢失。
 
-#### 关键设计决策
+策略：
 
-| 决策项 | 决定 |
-|--------|------|
-| 冷却时间 | 10 秒（固定） |
-| 冲突处理 | 放弃 stash，下次检测使用最新状态 |
-| 分支命名 | `autosave-YYYYMMDD-HHMMSS` |
-| 目标分支选择 | 当前分支尖端 → 复用；否则创建新分支 |
+- `load`、`route switch`、`route create` 默认要求工作区干净。
+- 如果工作区脏，提供明确的三选一确认：
+  - `保存`：先执行稳定保存，再继续操作；
+  - `丢弃`：硬重置并清理未跟踪文件，然后继续；
+  - `取消`：退出操作。
+- 引入专门的“丢弃更改”操作（需二次确认）。
 
-#### 边界情况处理
+## 自动保存状态说明
 
-| 场景 | 处理方式 |
-|------|----------|
-| stash pop 冲突 | drop stash，退出流程 |
-| detached HEAD | 创建新 autosave 分支 |
-| 无未提交更改 | 直接退出 |
+- `autosave` 配置仅作为占位信息（启用/间隔/最大数量），暂不触发后台保存。
+- TUI 与 CLI 仅展示配置，不会主动创建 autosave 提交或分支。
 
-#### 不需要处理的场景
+## 相关文件
 
-- 不会出现多个 autosave 分支指向同一个 HEAD（autosave 每次都会产生新提交）
+- `gitsave/src/manager/mod.rs`: `ConfigManager::load_auto_save_config()`
+- `gitsave/src/main.rs`: `handle_autosave()`（仅配置入口）
+- `gitsave/src/cli/mod.rs`: `Autosave` 命令定义
 
-#### 待确认问题
-
-1. 10秒冷却时间是否需要可配置？
-2. 是否需要 `--force` 选项处理分支名冲突？
-
-#### 相关文件
-
-- `src/manager/mod.rs`: `SaveManager::should_auto_save()`, `SaveManager::update_last_save_time()`
-- `src/manager/mod.rs`: `ConfigManager::load_auto_save_config()`, `ConfigManager::save_auto_save_config()`
-- `src/main.rs`: `handle_autosave()`
-- `src/cli/mod.rs`: `Autosave` 命令定义
-
-#### 使用示例（未来）
-
-```bash
-# 基于时间间隔的自动保存
-gitsave autosave --enable --interval 60
-
-# 基于变化检测的自动保存（待实现）
-gitsave autosave --watch --on-change
-
-# 显示当前配置
-gitsave autosave --status
-```
-
-### TUI 集成规划
-
-为了避免在 CLI 中引入伪实时守护逻辑，自动保存调度将与未来的 TUI 客户端协作实施：
-
-1. **事件驱动刷新**：TUI 将维护一个异步任务（基于 tokio runtime 或 crossbeam channel），周期性调用 `SaveManager::should_auto_save()` 并在满足条件时触发 `save`，确保 UI 能展示倒计时与最近一次自动保存结果。
-2. **统一状态模型**：TUI 需要读取 `.git/gitsave.toml` 中的自动保存配置，并在 UI 中提供启用、禁用、间隔和最大数量的可视化控制，所有设置仍通过 CLI 同步写回配置文件。
-3. **安全开关**：在 TUI 中暴露“实时模式”开关，确保在性能受限的机器上可以手动暂停自动保存，或切换回 CLI-only 模式。
-4. **可视化反馈**：TUI 的历史视图展示从 `Git2Core::get_history()` 返回的路线信息，可直接标记由自动保存对应的提交，并允许用户一键清理 `_autosave_*` 标签。
-
-在实现 TUI 前，CLI 的 autosave 命令仅负责配置管理；真正的定时触发将由 TUI 统一驱动，避免重复实现轮询逻辑。

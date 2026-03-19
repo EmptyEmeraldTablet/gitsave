@@ -24,12 +24,8 @@
 ## TUI 在 Windows 上卡顿
 Windows 终端渲染性能有限，建议使用 Windows Terminal。TUI 已降低重绘频率以减轻卡顿，但大型存档操作仍可能短暂停顿。
 
-## autosave 默认关闭
-自动保存需要手动启用：
-
-```bash
-gitsave autosave --enable
-```
+## 自动保存为什么没有生效？
+自动保存功能暂不实现，当前仅保留配置入口与状态展示。
 
 ## gitsave.toml 为什么在 .git 内？
 为了配合回滚设计，配置文件存储在 `.git` 内部，避免回滚时被误删或被忽略。
