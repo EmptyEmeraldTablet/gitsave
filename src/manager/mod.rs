@@ -1,7 +1,119 @@
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use std::time::{Duration, UNIX_EPOCH};
+
+use globset::{Glob, GlobSet, GlobSetBuilder};
+
 use crate::core::{CompareResult, RouteInfo, SaveEntry, SaveResult, SaveStatus};
 use crate::error::{Result, SaveError};
 use crate::git::Git2Core;
-use std::path::Path;
+
+const STABILITY_WINDOW_MS: u64 = 1200;
+const STABILITY_MAX_ATTEMPTS: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileSignature {
+    size: u64,
+    mtime_nanos: u128,
+}
+
+struct IgnoreMatcher {
+    set: GlobSet,
+}
+
+impl IgnoreMatcher {
+    fn new(patterns: &[String]) -> Result<Self> {
+        let mut builder = GlobSetBuilder::new();
+        builder
+            .add(Glob::new(".git/**").map_err(|err| SaveError::Config(err.to_string()))?);
+        for pattern in patterns {
+            builder.add(Glob::new(pattern).map_err(|err| SaveError::Config(err.to_string()))?);
+        }
+        let set = builder
+            .build()
+            .map_err(|err| SaveError::Config(err.to_string()))?;
+        Ok(Self { set })
+    }
+
+    fn is_ignored_file(&self, rel_path: &str) -> bool {
+        if rel_path.is_empty() {
+            return false;
+        }
+        self.set.is_match(rel_path)
+    }
+
+    fn is_ignored_dir(&self, rel_path: &str) -> bool {
+        if rel_path.is_empty() {
+            return false;
+        }
+        if self.set.is_match(rel_path) {
+            return true;
+        }
+        let mut buf = String::from(rel_path);
+        if !buf.ends_with('/') {
+            buf.push('/');
+        }
+        self.set.is_match(&buf)
+    }
+}
+
+fn collect_snapshot(root: &Path, matcher: &IgnoreMatcher) -> Result<HashMap<String, FileSignature>> {
+    let mut snapshot = HashMap::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir).map_err(SaveError::Io)?;
+        for entry in entries {
+            let entry = entry.map_err(SaveError::Io)?;
+            let path = entry.path();
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let rel_str = normalize_rel_path(rel);
+            if rel_str == ".git" || rel_str.starts_with(".git/") {
+                continue;
+            }
+
+            let metadata = fs::symlink_metadata(&path).map_err(SaveError::Io)?;
+            if metadata.is_dir() {
+                if matcher.is_ignored_dir(&rel_str) {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+
+            if !metadata.is_file() {
+                continue;
+            }
+
+            if matcher.is_ignored_file(&rel_str) {
+                continue;
+            }
+
+            snapshot.insert(rel_str, file_signature(&metadata));
+        }
+    }
+
+    Ok(snapshot)
+}
+
+fn normalize_rel_path(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    raw.trim_start_matches("./").to_string()
+}
+
+fn file_signature(metadata: &fs::Metadata) -> FileSignature {
+    let mtime_nanos = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    FileSignature {
+        size: metadata.len(),
+        mtime_nanos,
+    }
+}
 
 pub struct SaveManager {
     core: Git2Core,
@@ -17,11 +129,20 @@ impl SaveManager {
     }
 
     pub fn save(&mut self, message: &str) -> Result<SaveResult> {
+        self.ensure_stable()?;
+        self.save_force(message)
+    }
+
+    pub fn save_force(&mut self, message: &str) -> Result<SaveResult> {
         if message.is_empty() {
             let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
             return self.core.commit(&timestamp);
         }
         self.core.commit(message)
+    }
+
+    pub fn discard_changes(&mut self) -> Result<()> {
+        self.core.discard_changes()
     }
 
     pub fn load(&mut self, target: &str, preview: bool) -> Result<()> {
@@ -71,6 +192,25 @@ impl SaveManager {
         }
         self.core.checkout_by_tag(tag_name)?;
         Ok(())
+    }
+
+    fn ensure_stable(&self) -> Result<()> {
+        let ignore = ConfigManager::new(self.core.workdir()).load_ignore_patterns();
+        let matcher = IgnoreMatcher::new(&ignore.patterns)?;
+        let mut snapshot = collect_snapshot(self.core.workdir(), &matcher)?;
+
+        for _ in 0..STABILITY_MAX_ATTEMPTS {
+            std::thread::sleep(Duration::from_millis(STABILITY_WINDOW_MS));
+            let next = collect_snapshot(self.core.workdir(), &matcher)?;
+            if next == snapshot {
+                return Ok(());
+            }
+            snapshot = next;
+        }
+
+        Err(SaveError::UnstableSave {
+            attempts: STABILITY_MAX_ATTEMPTS,
+        })
     }
 
     pub fn should_auto_save(&self) -> bool {

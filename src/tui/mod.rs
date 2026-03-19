@@ -19,13 +19,12 @@ use ratatui::terminal::Terminal;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::core::{RouteInfo, SaveEntry, SaveStatus};
+use crate::core::{RouteInfo, SaveEntry, SaveResult, SaveStatus};
 use crate::error::SaveError;
 use crate::git::Git2Core;
 use crate::manager::{AutoSaveConfig, ConfigManager, RouteManager, SaveManager};
 
 const AUTO_REFRESH_SECS: u64 = 10;
-const AUTO_SAVE_POLL_SECS: u64 = 1;
 const BUSY_REDRAW_MS: u64 = 500;
 const TICK_RATE_MS: u64 = 400;
 const MAX_NOTIFICATION_LINES: usize = 4;
@@ -131,19 +130,56 @@ enum UiMode {
     Normal,
     CreateRoute {
         buffer: String,
+        switch: bool,
     },
     ConfirmAction {
         prompt: String,
         action: PendingAction,
     },
+    ResolveDirty {
+        prompt: String,
+        action: PendingAction,
+    },
+    ResolveUnstableSave {
+        prompt: String,
+        request: SaveRequest,
+    },
 }
 
 #[derive(Clone)]
 enum PendingAction {
-    QuickSave,
-    LoadSave { short_id: String, label: String },
-    CreateRoute { name: String },
-    SwitchRoute { name: String },
+    LoadSave {
+        short_id: String,
+        label: String,
+        force: bool,
+    },
+    CreateRoute {
+        name: String,
+        switch: bool,
+    },
+    SwitchRoute {
+        name: String,
+        force: bool,
+    },
+    DiscardChanges,
+}
+
+#[derive(Clone)]
+struct SaveRequest {
+    message: String,
+    after: Option<PendingAction>,
+}
+
+#[derive(Clone, Copy)]
+enum SaveMode {
+    Stable,
+    Force,
+}
+
+enum SaveOutcome {
+    Saved(SaveResult),
+    Unstable(u32),
+    Failed(String),
 }
 
 struct AppState {
@@ -159,7 +195,6 @@ struct AppState {
     autosave: AutoSaveConfig,
     focus: Focus,
     last_refresh: Instant,
-    last_auto_poll: Instant,
     notifications: Vec<UiLogEntry>,
     mode: UiMode,
     follow_current_route: bool,
@@ -187,7 +222,6 @@ impl AppState {
             autosave: AutoSaveConfig::default(),
             focus: Focus::Routes,
             last_refresh: Instant::now(),
-            last_auto_poll: Instant::now(),
             notifications: Vec::new(),
             mode: UiMode::Normal,
             follow_current_route: true,
@@ -200,7 +234,7 @@ impl AppState {
     }
 
     fn refresh(&mut self) -> Result<()> {
-        let mut core = Git2Core::open(&self.save_dir)?;
+        let core = Git2Core::open(&self.save_dir)?;
         self.routes = core.list_routes()?;
         if self.routes.is_empty() {
             self.route_index = 0;
@@ -273,7 +307,7 @@ impl AppState {
     }
 
     fn apply_history_filter(&mut self) {
-        let mut filtered: Vec<SaveEntry> = if self.current_route_name().is_some() {
+        let filtered: Vec<SaveEntry> = if self.current_route_name().is_some() {
             if self.route_history_ready {
                 self.all_history
                     .iter()
@@ -375,19 +409,39 @@ impl AppState {
                         handled = true;
                     }
                     KeyCode::Char('s') => {
-                        self.request_quick_save();
+                        self.start_save(SaveMode::Stable)?;
+                        handled = true;
+                    }
+                    KeyCode::Char('S') => {
+                        self.start_save(SaveMode::Force)?;
                         handled = true;
                     }
                     KeyCode::Char('l') => {
-                        self.request_load_selected();
+                        self.request_load_selected(false);
+                        handled = true;
+                    }
+                    KeyCode::Char('L') => {
+                        self.request_load_selected(true);
                         handled = true;
                     }
                     KeyCode::Char('c') => {
-                        self.start_route_prompt();
+                        self.start_route_prompt(false);
                         handled = true;
                     }
-                    KeyCode::Char('a') => {
-                        self.trigger_manual_autosave()?;
+                    KeyCode::Char('C') => {
+                        self.start_route_prompt(true);
+                        handled = true;
+                    }
+                    KeyCode::Char('x') => {
+                        self.request_route_switch(false);
+                        handled = true;
+                    }
+                    KeyCode::Char('X') => {
+                        self.request_route_switch(true);
+                        handled = true;
+                    }
+                    KeyCode::Char('d') => {
+                        self.request_discard_changes();
                         handled = true;
                     }
                     KeyCode::Enter => {
@@ -421,7 +475,7 @@ impl AppState {
                 }
                 Ok(false)
             }
-            UiMode::CreateRoute { buffer } => {
+            UiMode::CreateRoute { buffer, .. } => {
                 let mut handled = false;
                 match code {
                     KeyCode::Esc => {
@@ -478,49 +532,77 @@ impl AppState {
                 }
                 Ok(false)
             }
-        }
-    }
-
-    fn maybe_auto_save(&mut self, force_check: bool) -> Result<()> {
-        if !self.autosave.enabled {
-            if force_check {
-                self.log_info("Auto-save disabled. Use `gitsave autosave --enable` to turn it on.");
+            UiMode::ResolveDirty { action, .. } => {
+                let mut handled = false;
+                match code {
+                    KeyCode::Char(ch) => match ch.to_ascii_lowercase() {
+                        's' => {
+                            let pending = action.clone();
+                            self.mode = UiMode::Normal;
+                            self.save_then_action(pending)?;
+                            handled = true;
+                        }
+                        'd' => {
+                            let pending = action.clone();
+                            self.mode = UiMode::Normal;
+                            self.discard_then_action(pending)?;
+                            handled = true;
+                        }
+                        'c' => {
+                            self.log_info("Action cancelled");
+                            self.mode = UiMode::Normal;
+                            handled = true;
+                        }
+                        _ => {}
+                    },
+                    KeyCode::Esc => {
+                        self.log_info("Action cancelled");
+                        self.mode = UiMode::Normal;
+                        handled = true;
+                    }
+                    _ => {}
+                }
+                if handled {
+                    self.mark_dirty();
+                }
+                Ok(false)
             }
-            return Ok(());
-        }
-        if !force_check && self.last_auto_poll.elapsed() < Duration::from_secs(AUTO_SAVE_POLL_SECS)
-        {
-            return Ok(());
-        }
-        self.last_auto_poll = Instant::now();
-
-        let mut manager = SaveManager::new(Git2Core::open(&self.save_dir)?);
-        if !manager.should_auto_save() {
-            if force_check {
-                self.log_info("Auto-save interval not reached yet.");
+            UiMode::ResolveUnstableSave { request, .. } => {
+                let mut handled = false;
+                match code {
+                    KeyCode::Char(ch) => match ch.to_ascii_lowercase() {
+                        'f' => {
+                            let pending = request.clone();
+                            self.mode = UiMode::Normal;
+                            self.perform_save_force(pending)?;
+                            handled = true;
+                        }
+                        'r' => {
+                            let pending = request.clone();
+                            self.mode = UiMode::Normal;
+                            self.perform_save_stable(pending)?;
+                            handled = true;
+                        }
+                        'c' => {
+                            self.log_info("Save cancelled");
+                            self.mode = UiMode::Normal;
+                            handled = true;
+                        }
+                        _ => {}
+                    },
+                    KeyCode::Esc => {
+                        self.log_info("Save cancelled");
+                        self.mode = UiMode::Normal;
+                        handled = true;
+                    }
+                    _ => {}
+                }
+                if handled {
+                    self.mark_dirty();
+                }
+                Ok(false)
             }
-            return Ok(());
         }
-
-        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-        match manager.save(&format!("[auto] {}", timestamp)) {
-            Ok(result) => {
-                manager.update_last_save_time();
-                self.log_info(format!(
-                    "Auto-save complete ({} - {})",
-                    result.short_oid, result.message
-                ));
-                self.refresh()?;
-            }
-            Err(err) => {
-                self.log_error(format!("Auto-save error: {}", err));
-            }
-        }
-        Ok(())
-    }
-
-    fn trigger_manual_autosave(&mut self) -> Result<()> {
-        self.with_busy("Auto-saving...", |s| s.maybe_auto_save(true))
     }
 
     fn log_info(&mut self, message: impl Into<String>) {
@@ -543,14 +625,51 @@ impl AppState {
         self.notifications.last()
     }
 
-    fn request_quick_save(&mut self) {
-        self.mode = UiMode::ConfirmAction {
-            prompt: "Quick save current working tree?".to_string(),
-            action: PendingAction::QuickSave,
+    fn start_save(&mut self, mode: SaveMode) -> Result<()> {
+        let message = self.save_message_for_mode(mode);
+        let request = SaveRequest {
+            message,
+            after: None,
         };
+        match mode {
+            SaveMode::Stable => self.perform_save_stable(request),
+            SaveMode::Force => self.perform_save_force(request),
+        }
     }
 
-    fn request_load_selected(&mut self) {
+    fn save_then_action(&mut self, action: PendingAction) -> Result<()> {
+        let request = SaveRequest {
+            message: self.guard_message_for_action(&action),
+            after: Some(action),
+        };
+        self.perform_save_stable(request)
+    }
+
+    fn discard_then_action(&mut self, action: PendingAction) -> Result<()> {
+        let mut discarded = false;
+        self.with_busy("Discarding changes...", |s| {
+            let mut manager = SaveManager::new(Git2Core::open(&s.save_dir)?);
+            match manager.discard_changes() {
+                Ok(()) => {
+                    discarded = true;
+                    s.log_info("Discarded uncommitted changes.");
+                    s.refresh()?;
+                }
+                Err(err) => {
+                    s.log_error(format!("Discard failed: {}", err));
+                }
+            }
+            Ok(())
+        })?;
+
+        if discarded {
+            self.execute_pending_action(action)?;
+        }
+
+        Ok(())
+    }
+
+    fn request_load_selected(&mut self, force: bool) {
         let entry = match self.history.get(self.history_index) {
             Some(entry) => entry.clone(),
             None => {
@@ -558,22 +677,34 @@ impl AppState {
                 return;
             }
         };
-        let mut prompt = format!("Load save {} ({})?", entry.short_id, entry.message);
-        if self.status.has_uncommitted_changes {
-            prompt.push_str(" Unsaved changes will be discarded!");
-        }
-        self.mode = UiMode::ConfirmAction {
-            prompt,
-            action: PendingAction::LoadSave {
-                short_id: entry.short_id.clone(),
-                label: entry.message.clone(),
-            },
+        let action = PendingAction::LoadSave {
+            short_id: entry.short_id.clone(),
+            label: entry.message.clone(),
+            force,
         };
+        if force {
+            self.mode = UiMode::ConfirmAction {
+                prompt: format!(
+                    "Force load save {} ({})? Unsaved changes will be discarded.",
+                    entry.short_id, entry.message
+                ),
+                action,
+            };
+            return;
+        }
+
+        let prompt = format!("Load save {} ({})?", entry.short_id, entry.message);
+        if self.status.has_uncommitted_changes {
+            self.mode = UiMode::ResolveDirty { prompt, action };
+        } else {
+            self.mode = UiMode::ConfirmAction { prompt, action };
+        }
     }
 
-    fn start_route_prompt(&mut self) {
+    fn start_route_prompt(&mut self, switch: bool) {
         self.mode = UiMode::CreateRoute {
             buffer: String::new(),
+            switch,
         };
     }
 
@@ -582,8 +713,8 @@ impl AppState {
     }
 
     fn prepare_route_creation(&mut self) -> Result<()> {
-        let name = match &self.mode {
-            UiMode::CreateRoute { buffer } => buffer.trim().to_string(),
+        let (name, switch) = match &self.mode {
+            UiMode::CreateRoute { buffer, switch } => (buffer.trim().to_string(), *switch),
             _ => return Ok(()),
         };
         if name.is_empty() {
@@ -591,52 +722,192 @@ impl AppState {
             self.mode = UiMode::Normal;
             return Ok(());
         }
-        self.mode = UiMode::ConfirmAction {
-            prompt: format!("Create new route '{}'?", name),
-            action: PendingAction::CreateRoute { name },
+        let prompt = if switch {
+            format!("Create and switch to route '{}'?", name)
+        } else {
+            format!("Create new route '{}'?", name)
         };
+        let action = PendingAction::CreateRoute { name, switch };
+        if self.status.has_uncommitted_changes {
+            self.mode = UiMode::ResolveDirty { prompt, action };
+        } else {
+            self.mode = UiMode::ConfirmAction { prompt, action };
+        }
         Ok(())
+    }
+
+    fn request_route_switch(&mut self, force: bool) {
+        let route = match self.routes.get(self.route_index) {
+            Some(r) => r,
+            None => {
+                self.log_error("No route selected.");
+                return;
+            }
+        };
+        if route.is_current {
+            self.log_info(format!("Already on route '{}'", route.name));
+            return;
+        }
+
+        let action = PendingAction::SwitchRoute {
+            name: route.name.clone(),
+            force,
+        };
+        if force {
+            self.mode = UiMode::ConfirmAction {
+                prompt: format!(
+                    "Force switch to route '{}'? Unsaved changes will be discarded.",
+                    route.name
+                ),
+                action,
+            };
+            return;
+        }
+
+        let prompt = format!("Switch to route '{}'?", route.name);
+        if self.status.has_uncommitted_changes {
+            self.mode = UiMode::ResolveDirty { prompt, action };
+        } else {
+            self.mode = UiMode::ConfirmAction { prompt, action };
+        }
+    }
+
+    fn request_discard_changes(&mut self) {
+        if !self.status.has_uncommitted_changes {
+            self.log_info("Working tree already clean.");
+            return;
+        }
+        self.mode = UiMode::ConfirmAction {
+            prompt: "Discard all uncommitted changes? This removes untracked files.".to_string(),
+            action: PendingAction::DiscardChanges,
+        };
     }
 
     fn execute_pending_action(&mut self, action: PendingAction) -> Result<()> {
         match action {
-            PendingAction::QuickSave => self.perform_quick_save(),
-            PendingAction::LoadSave { short_id, label } => self.perform_load(&short_id, &label),
-            PendingAction::CreateRoute { name } => self.perform_route_creation(&name),
-            PendingAction::SwitchRoute { name } => self.perform_route_switch(&name),
+            PendingAction::LoadSave {
+                short_id,
+                label,
+                force,
+            } => self.perform_load(&short_id, &label, force),
+            PendingAction::CreateRoute { name, switch } => {
+                self.perform_route_creation(&name, switch)
+            }
+            PendingAction::SwitchRoute { name, force } => self.perform_route_switch(&name, force),
+            PendingAction::DiscardChanges => self.perform_discard_changes(),
         }
     }
 
-    fn perform_quick_save(&mut self) -> Result<()> {
+    fn perform_save_stable(&mut self, request: SaveRequest) -> Result<()> {
+        let message = request.message.clone();
+        let mut outcome = SaveOutcome::Failed("Save failed.".to_string());
         self.with_busy("Saving...", |s| {
             let mut manager = SaveManager::new(Git2Core::open(&s.save_dir)?);
-            if s.status.has_uncommitted_changes {
-                s.log_info("Working tree dirty; proceeding with quick save.");
-            }
-            let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-            match manager.save(&format!("[quick] {}", timestamp)) {
+            outcome = match manager.save(&message) {
                 Ok(result) => {
                     manager.update_last_save_time();
-                    s.log_info(format!(
-                        "Quick save complete ({} - {})",
-                        result.short_oid, result.message
-                    ));
-                    s.refresh()?;
+                    SaveOutcome::Saved(result)
                 }
-                Err(err) => s.log_error(format!("Quick save error: {}", err)),
-            }
+                Err(SaveError::UnstableSave { attempts }) => SaveOutcome::Unstable(attempts),
+                Err(err) => SaveOutcome::Failed(format!("Save error: {}", err)),
+            };
             Ok(())
-        })
+        })?;
+
+        match outcome {
+            SaveOutcome::Saved(result) => {
+                self.log_info(format!(
+                    "Save complete ({} - {})",
+                    result.short_oid, result.message
+                ));
+                self.refresh()?;
+                if let Some(action) = request.after {
+                    self.execute_pending_action(action)?;
+                }
+            }
+            SaveOutcome::Unstable(attempts) => {
+                self.mode = UiMode::ResolveUnstableSave {
+                    prompt: format!(
+                        "Save files still changing after {} checks. Force save?",
+                        attempts
+                    ),
+                    request,
+                };
+                self.mark_dirty();
+            }
+            SaveOutcome::Failed(message) => {
+                self.log_error(message);
+            }
+        }
+
+        Ok(())
     }
 
-    fn perform_load(&mut self, short_id: &str, label: &str) -> Result<()> {
-        self.with_busy("Loading save...", |s| {
+    fn perform_save_force(&mut self, request: SaveRequest) -> Result<()> {
+        let message = request.message.clone();
+        let mut outcome = SaveOutcome::Failed("Save failed.".to_string());
+        self.with_busy("Saving...", |s| {
+            let mut manager = SaveManager::new(Git2Core::open(&s.save_dir)?);
+            outcome = match manager.save_force(&message) {
+                Ok(result) => {
+                    manager.update_last_save_time();
+                    SaveOutcome::Saved(result)
+                }
+                Err(err) => SaveOutcome::Failed(format!("Save error: {}", err)),
+            };
+            Ok(())
+        })?;
+
+        match outcome {
+            SaveOutcome::Saved(result) => {
+                self.log_info(format!(
+                    "Force save complete ({} - {})",
+                    result.short_oid, result.message
+                ));
+                self.refresh()?;
+                if let Some(action) = request.after {
+                    self.execute_pending_action(action)?;
+                }
+            }
+            SaveOutcome::Failed(message) => {
+                self.log_error(message);
+            }
+            SaveOutcome::Unstable(_) => {}
+        }
+
+        Ok(())
+    }
+
+    fn perform_load(&mut self, short_id: &str, label: &str, force: bool) -> Result<()> {
+        let banner = if force { "Force loading save..." } else { "Loading save..." };
+        self.with_busy(banner, |s| {
+            if force {
+                let mut core = Git2Core::open(&s.save_dir)?;
+                match core.checkout(short_id) {
+                    Ok(()) => {
+                        s.log_info(format!("Loaded {} ({})", short_id, label));
+                        s.follow_current_route = true;
+                        s.refresh()?;
+                    }
+                    Err(SaveError::SaveNotFound(_)) => {
+                        s.log_error("Selected save no longer exists.");
+                    }
+                    Err(err) => {
+                        s.log_error(format!("Load failed: {}", err));
+                    }
+                }
+                return Ok(());
+            }
+
             let mut manager = SaveManager::new(Git2Core::open(&s.save_dir)?);
             match manager.load(short_id, false) {
                 Ok(()) => {
                     s.log_info(format!("Loaded {} ({})", short_id, label));
                     s.follow_current_route = true;
                     s.refresh()?;
+                }
+                Err(SaveError::UncommittedChanges) => {
+                    s.log_error("Working tree dirty; save or discard changes first.");
                 }
                 Err(SaveError::SaveNotFound(_)) => {
                     s.log_error("Selected save no longer exists.");
@@ -649,13 +920,22 @@ impl AppState {
         })
     }
 
-    fn perform_route_creation(&mut self, name: &str) -> Result<()> {
+    fn perform_route_creation(&mut self, name: &str, switch: bool) -> Result<()> {
         self.with_busy("Creating route...", |s| {
             let mut manager = RouteManager::new(Git2Core::open(&s.save_dir)?);
-            match manager.switch_create_route(name) {
+            let result = if switch {
+                manager.switch_create_route(name)
+            } else {
+                manager.create_route(name)
+            };
+            match result {
                 Ok(()) => {
-                    s.log_info(format!("Created route '{}'", name));
-                    s.follow_current_route = true;
+                    if switch {
+                        s.log_info(format!("Created and switched to route '{}'", name));
+                        s.follow_current_route = true;
+                    } else {
+                        s.log_info(format!("Created route '{}'", name));
+                    }
                     s.refresh()?;
                 }
                 Err(err) => {
@@ -666,8 +946,28 @@ impl AppState {
         })
     }
 
-    fn perform_route_switch(&mut self, name: &str) -> Result<()> {
-        self.with_busy("Switching route...", |s| {
+    fn perform_route_switch(&mut self, name: &str, force: bool) -> Result<()> {
+        let banner = if force { "Force switching route..." } else { "Switching route..." };
+        self.with_busy(banner, |s| {
+            if force {
+                let mut core = Git2Core::open(&s.save_dir)?;
+                if let Err(err) = core.discard_changes() {
+                    s.log_error(format!("Discard failed: {}", err));
+                    return Ok(());
+                }
+                match core.switch_route(name) {
+                    Ok(()) => {
+                        s.log_info(format!("Switched to route '{}'", name));
+                        s.follow_current_route = true;
+                        s.refresh()?;
+                    }
+                    Err(err) => {
+                        s.log_error(format!("Failed to switch route '{}': {}", name, err));
+                    }
+                }
+                return Ok(());
+            }
+
             let mut manager = RouteManager::new(Git2Core::open(&s.save_dir)?);
             match manager.switch_route(name) {
                 Ok(()) => {
@@ -683,35 +983,27 @@ impl AppState {
         })
     }
 
-    fn activate_selection(&mut self) {
-        match self.focus {
-            Focus::Routes => self.request_route_switch(),
-            Focus::History => self.request_load_selected(),
-        }
+    fn perform_discard_changes(&mut self) -> Result<()> {
+        self.with_busy("Discarding changes...", |s| {
+            let mut manager = SaveManager::new(Git2Core::open(&s.save_dir)?);
+            match manager.discard_changes() {
+                Ok(()) => {
+                    s.log_info("Discarded uncommitted changes.");
+                    s.refresh()?;
+                }
+                Err(err) => {
+                    s.log_error(format!("Discard failed: {}", err));
+                }
+            }
+            Ok(())
+        })
     }
 
-    fn request_route_switch(&mut self) {
-        let route = match self.routes.get(self.route_index) {
-            Some(r) => r,
-            None => {
-                self.log_error("No route selected.");
-                return;
-            }
-        };
-        if route.is_current {
-            self.log_info(format!("Already on route '{}'", route.name));
-            return;
+    fn activate_selection(&mut self) {
+        match self.focus {
+            Focus::Routes => self.request_route_switch(false),
+            Focus::History => self.request_load_selected(false),
         }
-        let mut prompt = format!("Switch to route '{}'?", route.name);
-        if self.status.has_uncommitted_changes {
-            prompt.push_str(" Unsaved changes will be discarded!");
-        }
-        self.mode = UiMode::ConfirmAction {
-            prompt,
-            action: PendingAction::SwitchRoute {
-                name: route.name.clone(),
-            },
-        };
     }
 
     fn with_busy<F>(&mut self, message: &str, mut action: F) -> Result<()>
@@ -724,6 +1016,34 @@ impl AppState {
         self.busy = None;
         self.mark_dirty();
         result
+    }
+
+    fn save_message_for_mode(&self, mode: SaveMode) -> String {
+        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+        match mode {
+            SaveMode::Stable => format!("[quick] {}", timestamp),
+            SaveMode::Force => format!("[force] {}", timestamp),
+        }
+    }
+
+    fn guard_message_for_action(&self, action: &PendingAction) -> String {
+        let detail = match action {
+            PendingAction::LoadSave { short_id, .. } => {
+                format!("before load {}", short_id)
+            }
+            PendingAction::CreateRoute { name, switch } => {
+                if *switch {
+                    format!("before create+switch route {}", name)
+                } else {
+                    format!("before create route {}", name)
+                }
+            }
+            PendingAction::SwitchRoute { name, .. } => {
+                format!("before switch route {}", name)
+            }
+            PendingAction::DiscardChanges => "before discard".to_string(),
+        };
+        format!("[guard] {}", detail)
     }
 }
 
@@ -827,24 +1147,23 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
 
     let help = Paragraph::new(Line::from(vec![
         Span::styled("↑/↓ j/k", Style::default().fg(Color::Yellow)),
-        Span::raw(" navigate  "),
+        Span::raw(" move  "),
         Span::styled("PgUp/PgDn", Style::default().fg(Color::Yellow)),
-        Span::raw(" fast scroll  "),
-        Span::styled("s", Style::default().fg(Color::Yellow)),
-        Span::raw(": quick save  "),
-        Span::styled("l", Style::default().fg(Color::Yellow)),
-        Span::raw(": load selection  "),
-        Span::styled("c", Style::default().fg(Color::Yellow)),
-        Span::raw(": new route  "),
-        Span::styled("Focus:", Style::default().fg(Color::Gray)),
-        Span::raw(format!(
-            " {}",
-            match app.focus {
-                Focus::Routes => "Routes",
-                Focus::History => "History",
-            }
-        )),
-        Span::raw("  autosave runs automatically when enabled"),
+        Span::raw(" page  "),
+        Span::styled("s/S", Style::default().fg(Color::Yellow)),
+        Span::raw(": save  "),
+        Span::styled("l/L", Style::default().fg(Color::Yellow)),
+        Span::raw(": load  "),
+        Span::styled("c/C", Style::default().fg(Color::Yellow)),
+        Span::raw(": create  "),
+        Span::styled("x/X", Style::default().fg(Color::Yellow)),
+        Span::raw(": switch  "),
+        Span::styled("d", Style::default().fg(Color::Yellow)),
+        Span::raw(": discard  "),
+        Span::styled("Tab", Style::default().fg(Color::Yellow)),
+        Span::raw(": focus  "),
+        Span::styled("q", Style::default().fg(Color::Yellow)),
+        Span::raw(": quit"),
     ]));
     f.render_widget(help, chunks[3]);
 
@@ -1033,7 +1352,7 @@ fn status_message(app: &AppState) -> Vec<Line<'static>> {
             .count();
         lines.push(Line::from(Span::styled(
             format!(
-                "Dirty files: {} ({} new/untracked) — save before switching routes!",
+                "Dirty files: {} ({} new/untracked) — s to save, d to discard",
                 total, new_files
             ),
             Style::default().fg(Color::Red),
@@ -1098,14 +1417,22 @@ impl ModalOverlay {
     fn from_app(app: &AppState) -> Option<Self> {
         match &app.mode {
             UiMode::Normal => None,
-            UiMode::CreateRoute { buffer } => {
+            UiMode::CreateRoute { buffer, switch } => {
                 let mut lines = Vec::new();
-                lines.push(Line::from("Enter a new route name."));
+                if *switch {
+                    lines.push(Line::from("Enter a new route name to create and switch."));
+                } else {
+                    lines.push(Line::from("Enter a new route name."));
+                }
                 lines.push(Line::from(format!("> {}", buffer)));
                 lines.push(Line::from("Allowed: letters, digits, -, _, /."));
                 lines.push(Line::from("Enter = confirm · Esc = cancel"));
                 Some(Self {
-                    title: "Create Route".to_string(),
+                    title: if *switch {
+                        "Create & Switch".to_string()
+                    } else {
+                        "Create Route".to_string()
+                    },
                     lines,
                 })
             }
@@ -1116,6 +1443,26 @@ impl ModalOverlay {
                 ];
                 Some(Self {
                     title: "Confirm Action".to_string(),
+                    lines,
+                })
+            }
+            UiMode::ResolveDirty { prompt, .. } => {
+                let lines = vec![
+                    Line::from(prompt.clone()),
+                    Line::from("Choose: s = save, d = discard, c = cancel."),
+                ];
+                Some(Self {
+                    title: "Working Tree Dirty".to_string(),
+                    lines,
+                })
+            }
+            UiMode::ResolveUnstableSave { prompt, .. } => {
+                let lines = vec![
+                    Line::from(prompt.clone()),
+                    Line::from("Choose: f = force, r = retry, c = cancel."),
+                ];
+                Some(Self {
+                    title: "Save Not Stable".to_string(),
                     lines,
                 })
             }

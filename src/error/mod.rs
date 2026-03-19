@@ -14,6 +14,9 @@ pub enum SaveError {
     #[error("Uncommitted changes. Save first or use --force")]
     UncommittedChanges,
 
+    #[error("Save files are still changing after {attempts} checks")]
+    UnstableSave { attempts: u32 },
+
     #[error("Corrupted data: {0}")]
     CorruptedData(String),
 

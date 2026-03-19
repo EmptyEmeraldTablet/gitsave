@@ -106,6 +106,29 @@ impl Git2Core {
         Ok(())
     }
 
+    pub fn discard_changes(&mut self) -> Result<()> {
+        let head = match self.repo.head() {
+            Ok(head) => head,
+            Err(_) => return Ok(()),
+        };
+        let commit = match head.peel_to_commit() {
+            Ok(commit) => commit,
+            Err(_) => return Ok(()),
+        };
+
+        let mut checkout_opts = git2::build::CheckoutBuilder::new();
+        checkout_opts
+            .force()
+            .remove_untracked(true)
+            .remove_ignored(true);
+
+        self.repo
+            .reset(&commit.into_object(), ResetType::Hard, Some(&mut checkout_opts))
+            .map_err(SaveError::Repository)?;
+
+        Ok(())
+    }
+
     pub fn get_history(&self) -> Result<Vec<SaveEntry>> {
         let mut entries = Vec::new();
         let mut seen_oids = HashSet::new();

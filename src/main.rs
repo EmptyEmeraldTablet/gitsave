@@ -141,15 +141,19 @@ fn handle_autosave(
 }
 
 fn handle_save(save_dir: &Path, message: &str) -> Result<()> {
-    let mut core = Git2Core::open(save_dir).context("Failed to open repository")?;
+    let core = Git2Core::open(save_dir).context("Failed to open repository")?;
     let mut manager = SaveManager::new(core);
 
-    let result = manager.save(message).context("Failed to save")?;
-    manager.update_last_save_time();
-    println!("[OK] Save successful!");
-    println!("  ID: {}", result.short_oid);
-    println!("  Message: {}", result.message);
-    println!("  Files changed: {}", result.changed_files);
+    let result = perform_stable_save_interactive(&mut manager, message)?;
+    if let Some(result) = result {
+        manager.update_last_save_time();
+        println!("[OK] Save successful!");
+        println!("  ID: {}", result.short_oid);
+        println!("  Message: {}", result.message);
+        println!("  Files changed: {}", result.changed_files);
+    } else {
+        println!("Cancelled.");
+    }
     Ok(())
 }
 
@@ -157,7 +161,7 @@ fn handle_load(
     save_dir: &Path,
     list: bool,
     preview: bool,
-    _force: bool,
+    force: bool,
     tag: &Option<String>,
     identifier: &Option<String>,
 ) -> Result<()> {
@@ -184,7 +188,23 @@ fn handle_load(
             return Ok(());
         }
 
-        match manager.load_by_tag(tag_name, _force) {
+        let status = manager.get_status()?;
+        if status.has_uncommitted_changes {
+            if force {
+                if !confirm_discard_changes(
+                    "Uncommitted changes detected. Loading will discard them. Proceed?",
+                )? {
+                    println!("Cancelled.");
+                    return Ok(());
+                }
+                manager.discard_changes()?;
+            } else if !ensure_clean_for_action(&mut manager, "loading tag")? {
+                println!("Cancelled.");
+                return Ok(());
+            }
+        }
+
+        match manager.load_by_tag(tag_name, true) {
             Ok(()) => println!("Loaded tag: {}", tag_name),
             Err(e) => {
                 eprintln!("[ERROR] Failed to load tag '{}': {}", tag_name, e);
@@ -200,15 +220,17 @@ fn handle_load(
             return Ok(());
         }
 
-        // 检查是否有未提交的更改
         let status = manager.get_status()?;
         if status.has_uncommitted_changes {
-            if !_force {
-                eprintln!("[ERROR] Uncommitted changes. Save first or use --force");
-                std::process::exit(1);
-            } else if !confirm_discard_changes(
-                "Uncommitted changes detected. Loading will discard them. Proceed?",
-            )? {
+            if force {
+                if !confirm_discard_changes(
+                    "Uncommitted changes detected. Loading will discard them. Proceed?",
+                )? {
+                    println!("Cancelled.");
+                    return Ok(());
+                }
+                manager.discard_changes()?;
+            } else if !ensure_clean_for_action(&mut manager, "loading save")? {
                 println!("Cancelled.");
                 return Ok(());
             }
@@ -298,7 +320,8 @@ fn handle_route(save_dir: &Path, list_flag: bool, command: &Option<RouteCommands
             return print_routes(&manager);
         }
         Some(RouteCommands::Create { name }) => {
-            if !ensure_clean_or_confirm(save_dir, "Creating a new route")? {
+            let mut guard_manager = SaveManager::new(Git2Core::open(save_dir)?);
+            if !ensure_clean_for_action(&mut guard_manager, "creating a route")? {
                 println!("Cancelled.");
                 return Ok(());
             }
@@ -308,7 +331,8 @@ fn handle_route(save_dir: &Path, list_flag: bool, command: &Option<RouteCommands
             println!("[OK] Created route: {}", name);
         }
         Some(RouteCommands::Switch { name, create }) => {
-            if !ensure_clean_or_confirm(save_dir, "Switching routes")? {
+            let mut guard_manager = SaveManager::new(Git2Core::open(save_dir)?);
+            if !ensure_clean_for_action(&mut guard_manager, "switching routes")? {
                 println!("Cancelled.");
                 return Ok(());
             }
@@ -438,6 +462,18 @@ fn handle_route(save_dir: &Path, list_flag: bool, command: &Option<RouteCommands
     Ok(())
 }
 
+enum DirtyDecision {
+    Save,
+    Discard,
+    Cancel,
+}
+
+enum UnstableDecision {
+    Force,
+    Retry,
+    Cancel,
+}
+
 fn confirm_discard_changes(message: &str) -> Result<bool> {
     eprint!("[WARN] {} [y/N]: ", message);
     io::stderr().flush().ok();
@@ -449,16 +485,95 @@ fn confirm_discard_changes(message: &str) -> Result<bool> {
     Ok(resp == "y" || resp == "yes")
 }
 
-fn ensure_clean_or_confirm(save_dir: &Path, action: &str) -> Result<bool> {
-    let core = Git2Core::open(save_dir)?;
-    let status = core.get_status()?;
+fn prompt_dirty_decision(action: &str) -> Result<DirtyDecision> {
+    loop {
+        eprint!(
+            "[WARN] Uncommitted changes detected. {} requires a clean working tree. ",
+            action
+        );
+        eprint!("Choose (s)ave, (d)iscard, (c)ancel: ");
+        io::stderr().flush().ok();
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read input")?;
+        match input.trim().to_lowercase().as_str() {
+            "s" | "save" => return Ok(DirtyDecision::Save),
+            "d" | "discard" => return Ok(DirtyDecision::Discard),
+            "c" | "cancel" | "" => return Ok(DirtyDecision::Cancel),
+            _ => eprintln!("Please enter s, d, or c."),
+        }
+    }
+}
+
+fn prompt_unstable_decision(attempts: u32) -> Result<UnstableDecision> {
+    loop {
+        eprint!(
+            "[WARN] Save files still changing after {} checks. ",
+            attempts
+        );
+        eprint!("Choose (f)orce, (r)etry, (c)ancel: ");
+        io::stderr().flush().ok();
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read input")?;
+        match input.trim().to_lowercase().as_str() {
+            "f" | "force" => return Ok(UnstableDecision::Force),
+            "r" | "retry" => return Ok(UnstableDecision::Retry),
+            "c" | "cancel" | "" => return Ok(UnstableDecision::Cancel),
+            _ => eprintln!("Please enter f, r, or c."),
+        }
+    }
+}
+
+fn perform_stable_save_interactive(
+    manager: &mut SaveManager,
+    message: &str,
+) -> Result<Option<core::SaveResult>> {
+    loop {
+        match manager.save(message) {
+            Ok(result) => return Ok(Some(result)),
+            Err(SaveError::UnstableSave { attempts }) => match prompt_unstable_decision(attempts)? {
+                UnstableDecision::Force => {
+                    let result = manager.save_force(message)?;
+                    return Ok(Some(result));
+                }
+                UnstableDecision::Retry => continue,
+                UnstableDecision::Cancel => return Ok(None),
+            },
+            Err(err) => return Err(err).context("Failed to save"),
+        }
+    }
+}
+
+fn ensure_clean_for_action(manager: &mut SaveManager, action: &str) -> Result<bool> {
+    let status = manager.get_status()?;
     if !status.has_uncommitted_changes {
         return Ok(true);
     }
-    confirm_discard_changes(&format!(
-        "Uncommitted changes detected. {} will discard them. Proceed?",
-        action
-    ))
+    match prompt_dirty_decision(action)? {
+        DirtyDecision::Save => {
+            let message = format!("[guard] before {}", action);
+            let result = perform_stable_save_interactive(manager, &message)?;
+            if let Some(result) = result {
+                manager.update_last_save_time();
+                println!(
+                    "[OK] Saved changes before {} ({}).",
+                    action, result.short_oid
+                );
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        DirtyDecision::Discard => {
+            manager.discard_changes()?;
+            println!("[OK] Discarded uncommitted changes.");
+            Ok(true)
+        }
+        DirtyDecision::Cancel => Ok(false),
+    }
 }
 
 fn print_routes(manager: &RouteManager) -> Result<()> {
