@@ -238,6 +238,30 @@ impl Git2Core {
         Ok(entries)
     }
 
+    pub fn get_history_ids_for_route(&self, route: &str) -> Result<HashSet<String>> {
+        let mut ids = HashSet::new();
+        let branch = self
+            .repo
+            .find_branch(route, BranchType::Local)
+            .map_err(SaveError::Repository)?;
+        let reference_name = branch.get().name().map(|s| s.to_string());
+        let reference_name = match reference_name {
+            Some(name) => name,
+            None => return Ok(ids),
+        };
+
+        let mut revwalk = self.repo.revwalk().map_err(SaveError::Repository)?;
+        revwalk
+            .push_ref(&reference_name)
+            .map_err(SaveError::Repository)?;
+        for oid in revwalk {
+            let oid = oid.map_err(SaveError::Repository)?;
+            ids.insert(oid.to_string());
+        }
+
+        Ok(ids)
+    }
+
     pub fn get_status(&self) -> Result<SaveStatus> {
         let current_route = self.get_current_route_name()?;
         let last_save = self.get_last_save()?;

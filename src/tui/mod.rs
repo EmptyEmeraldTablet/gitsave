@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -152,6 +153,8 @@ struct AppState {
     all_history: Vec<SaveEntry>,
     history: Vec<SaveEntry>,
     history_index: usize,
+    route_history_ids: HashSet<String>,
+    route_history_ready: bool,
     status: SaveStatus,
     autosave: AutoSaveConfig,
     focus: Focus,
@@ -173,6 +176,8 @@ impl AppState {
             all_history: Vec::new(),
             history: Vec::new(),
             history_index: 0,
+            route_history_ids: HashSet::new(),
+            route_history_ready: false,
             status: SaveStatus {
                 current_route: String::new(),
                 last_save: None,
@@ -217,6 +222,9 @@ impl AppState {
         let mut history = core.get_history()?;
         history.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         self.all_history = history;
+        if let Err(err) = self.update_route_history_ids(&core) {
+            self.log_error(format!("Failed to load route history: {}", err));
+        }
         self.apply_history_filter();
 
         self.autosave = ConfigManager::new(&self.save_dir).load_auto_save_config();
@@ -239,13 +247,42 @@ impl AppState {
             .map(|route| route.name.clone())
     }
 
+    fn update_route_history_ids(&mut self, core: &Git2Core) -> Result<()> {
+        self.route_history_ids.clear();
+        self.route_history_ready = false;
+        let route = match self.current_route_name() {
+            Some(route) => route,
+            None => return Ok(()),
+        };
+        let ids = core.get_history_ids_for_route(&route)?;
+        self.route_history_ids = ids;
+        self.route_history_ready = true;
+        Ok(())
+    }
+
+    fn refresh_route_history_ids(&mut self) {
+        self.route_history_ids.clear();
+        self.route_history_ready = false;
+        let result = match Git2Core::open(&self.save_dir) {
+            Ok(core) => self.update_route_history_ids(&core),
+            Err(err) => Err(anyhow::Error::new(err)),
+        };
+        if let Err(err) = result {
+            self.log_error(format!("Failed to load route history: {}", err));
+        }
+    }
+
     fn apply_history_filter(&mut self) {
-        let mut filtered: Vec<SaveEntry> = if let Some(route) = self.current_route_name() {
-            self.all_history
-                .iter()
-                .filter(|entry| entry.route == route)
-                .cloned()
-                .collect()
+        let mut filtered: Vec<SaveEntry> = if self.current_route_name().is_some() {
+            if self.route_history_ready {
+                self.all_history
+                    .iter()
+                    .filter(|entry| self.route_history_ids.contains(&entry.id))
+                    .cloned()
+                    .collect()
+            } else {
+                self.all_history.clone()
+            }
         } else {
             self.all_history.clone()
         };
@@ -276,6 +313,7 @@ impl AppState {
                 if !self.routes.is_empty() && self.route_index + 1 < self.routes.len() {
                     self.route_index += 1;
                     self.follow_current_route = false;
+                    self.refresh_route_history_ids();
                     self.apply_history_filter();
                 }
             }
@@ -293,6 +331,7 @@ impl AppState {
                 if self.route_index > 0 {
                     self.route_index -= 1;
                     self.follow_current_route = false;
+                    self.refresh_route_history_ids();
                     self.apply_history_filter();
                 }
             }
@@ -943,8 +982,13 @@ fn draw_history_panel(f: &mut Frame, area: Rect, app: &AppState) {
 fn status_message(app: &AppState) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(current) = app.status.last_save.as_ref() {
+        let current_route = if app.status.current_route.is_empty() {
+            current.route.clone()
+        } else {
+            app.status.current_route.clone()
+        };
         lines.push(Line::from(Span::styled(
-            format!("Current save: {} ({})", current.short_id, current.route),
+            format!("Current save: {} ({})", current.short_id, current_route),
             Style::default().fg(Color::LightGreen),
         )));
         lines.push(Line::from(current.message.clone()));
@@ -960,9 +1004,12 @@ fn status_message(app: &AppState) -> Vec<Line<'static>> {
             .map(|save| save.short_id != selected.short_id)
             .unwrap_or(true)
         {
+            let selected_route = app
+                .current_route_name()
+                .unwrap_or_else(|| selected.route.clone());
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("Selected save: {} ({})", selected.short_id, selected.route),
+                format!("Selected save: {} ({})", selected.short_id, selected_route),
                 Style::default().fg(Color::Yellow),
             )));
             lines.push(Line::from(selected.message.clone()));
