@@ -1450,7 +1450,7 @@ fn draw_history_panel(f: &mut Frame, area: Rect, app: &AppState) {
         );
 
     let mut history_state = ListState::default();
-    if !app.history.is_empty() {
+    if !app.history.is_empty() && app.selected_route_is_current() {
         history_state.select(Some(app.history_index));
     }
     f.render_stateful_widget(history_list, panel_chunks[0], &mut history_state);
@@ -1479,7 +1479,17 @@ fn status_message(app: &AppState) -> Vec<Line<'static>> {
         lines.push(Line::from("Current save: unknown"));
     }
 
-    if let Some(selected) = app.history.get(app.history_index) {
+    if !app.selected_route_is_current() {
+        let selected_route = app
+            .current_route_name()
+            .unwrap_or_else(|| "unknown".to_string());
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("Selected route: {} (non-current)", selected_route),
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.push(Line::from("Switch to this route to browse or roll back."));
+    } else if let Some(selected) = app.history.get(app.history_index) {
         if app
             .status
             .last_save
