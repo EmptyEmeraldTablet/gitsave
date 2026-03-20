@@ -289,6 +289,13 @@ impl AppState {
             .map(|route| route.name.clone())
     }
 
+    fn selected_route_is_current(&self) -> bool {
+        self.routes
+            .get(self.route_index)
+            .map(|route| route.is_current)
+            .unwrap_or(true)
+    }
+
     fn update_route_history_ids(&mut self, core: &Git2Core) -> Result<()> {
         self.route_history_ids.clear();
         self.route_history_ready = false;
@@ -329,24 +336,28 @@ impl AppState {
             self.all_history.clone()
         };
 
+        self.history = filtered;
+        if self.history.is_empty() {
+            self.history_index = 0;
+            return;
+        }
+        if !self.selected_route_is_current() {
+            self.history_index = 0;
+            return;
+        }
         if let Some(current_save) = self.status.last_save.as_ref() {
-            if let Some(idx) = filtered
+            if let Some(idx) = self
+                .history
                 .iter()
                 .position(|entry| entry.short_id == current_save.short_id)
             {
                 self.history_index = idx;
-            } else if self.history_index >= filtered.len() && !filtered.is_empty() {
-                self.history_index = filtered.len() - 1;
+            } else if self.history_index >= self.history.len() {
+                self.history_index = self.history.len() - 1;
             }
-        } else if self.history_index >= filtered.len() && !filtered.is_empty() {
-            self.history_index = filtered.len() - 1;
+        } else if self.history_index >= self.history.len() {
+            self.history_index = self.history.len() - 1;
         }
-
-        if filtered.is_empty() {
-            self.history_index = 0;
-        }
-
-        self.history = filtered;
     }
 
     fn move_down(&mut self) {
@@ -457,7 +468,11 @@ impl AppState {
                         handled = true;
                     }
                     KeyCode::Tab => {
-                        self.toggle_focus();
+                        if self.focus == Focus::Routes && !self.selected_route_is_current() {
+                            self.log_info("Switch to this route to browse its history.");
+                        } else {
+                            self.toggle_focus();
+                        }
                         handled = true;
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
@@ -790,6 +805,10 @@ impl AppState {
     }
 
     fn request_rollback_selected(&mut self, force: bool) {
+        if !self.selected_route_is_current() {
+            self.log_info("Rollback locked. Switch to this route first.");
+            return;
+        }
         let entry = match self.history.get(self.history_index) {
             Some(entry) => entry.clone(),
             None => {
