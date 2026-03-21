@@ -541,6 +541,9 @@ impl Git2Core {
             .repo
             .branches(Some(BranchType::Local))
             .map_err(SaveError::Repository)?;
+        let mut regular_branches = Vec::new();
+        let mut recovery_branches = Vec::new();
+
         for branch_result in branches {
             let (branch, _) = branch_result.map_err(SaveError::Repository)?;
             let branch_display_name = branch
@@ -550,6 +553,18 @@ impl Git2Core {
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
 
+            if is_recovery_branch_name(&branch_display_name) {
+                recovery_branches.push((branch, branch_display_name));
+            } else {
+                regular_branches.push((branch, branch_display_name));
+            }
+        }
+
+        // Prefer regular branches so recovery snapshots do not hide normal history.
+        for (branch, branch_display_name) in regular_branches
+            .into_iter()
+            .chain(recovery_branches.into_iter())
+        {
             if let Some(reference_name) = branch.get().name() {
                 let mut branch_walk = self.repo.revwalk().map_err(SaveError::Repository)?;
                 branch_walk
@@ -817,4 +832,8 @@ impl Git2Core {
         let diff = diff.map_err(SaveError::Repository)?;
         Ok(diff.deltas().len())
     }
+}
+
+fn is_recovery_branch_name(name: &str) -> bool {
+    name.len() == 40 && name.chars().all(|ch| ch.is_ascii_hexdigit())
 }
