@@ -139,7 +139,6 @@ enum UiMode {
     AmendPrompt {
         buffer: String,
     },
-    RecoveryList,
     RecoveryRename {
         buffer: String,
         target: RouteInfo,
@@ -212,6 +211,7 @@ struct AppState {
     route_index: usize,
     recovery_routes: Vec<RouteInfo>,
     recovery_index: usize,
+    recovery_view: bool,
     all_history: Vec<SaveEntry>,
     history: Vec<SaveEntry>,
     history_index: usize,
@@ -236,6 +236,7 @@ impl AppState {
             route_index: 0,
             recovery_routes: Vec::new(),
             recovery_index: 0,
+            recovery_view: false,
             all_history: Vec::new(),
             history: Vec::new(),
             history_index: 0,
@@ -332,6 +333,10 @@ impl AppState {
             .unwrap_or(true)
     }
 
+    fn in_recovery_mode(&self) -> bool {
+        self.recovery_view
+    }
+
     fn update_route_history_ids(&mut self, core: &Git2Core) -> Result<()> {
         self.route_history_ids.clear();
         self.route_history_ready = false;
@@ -371,12 +376,6 @@ impl AppState {
         } else {
             self.all_history.clone()
         };
-
-        if !self.selected_route_is_current() {
-            self.history = filtered.into_iter().take(1).collect();
-            self.history_index = 0;
-            return;
-        }
 
         self.history = filtered;
         if self.history.is_empty() {
@@ -468,6 +467,78 @@ impl AppState {
     fn handle_key(&mut self, code: KeyCode, should_quit: &mut bool) -> Result<bool> {
         match &mut self.mode {
             UiMode::Normal => {
+                if self.recovery_view {
+                    let mut handled = false;
+                    match code {
+                        KeyCode::Char('q') => {
+                            *should_quit = true;
+                            return Ok(true);
+                        }
+                        KeyCode::Char('R') | KeyCode::Esc => {
+                            self.recovery_view = false;
+                            handled = true;
+                        }
+                        KeyCode::Char('r') => {
+                            self.with_busy("Refreshing recovery...", |s| s.load_recovery_routes())?;
+                            handled = true;
+                        }
+                        KeyCode::Enter => {
+                            if self.focus == Focus::Routes {
+                                self.start_recovery_rename()?;
+                            } else {
+                                self.log_info("Recovery view uses route list.");
+                            }
+                            handled = true;
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if self.focus == Focus::Routes {
+                                self.move_recovery_down();
+                            } else {
+                                self.move_down();
+                            }
+                            handled = true;
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if self.focus == Focus::Routes {
+                                self.move_recovery_up();
+                            } else {
+                                self.move_up();
+                            }
+                            handled = true;
+                        }
+                        KeyCode::PageDown => {
+                            self.page_down();
+                            handled = true;
+                        }
+                        KeyCode::PageUp => {
+                            self.page_up();
+                            handled = true;
+                        }
+                        KeyCode::Tab => {
+                            self.toggle_focus();
+                            handled = true;
+                        }
+                        KeyCode::Char('s')
+                        | KeyCode::Char('S')
+                        | KeyCode::Char('l')
+                        | KeyCode::Char('L')
+                        | KeyCode::Char('c')
+                        | KeyCode::Char('C')
+                        | KeyCode::Char('n')
+                        | KeyCode::Char('x')
+                        | KeyCode::Char('X')
+                        | KeyCode::Char('d')
+                        | KeyCode::Char('m') => {
+                            self.log_info("Exit recovery view to manage routes or saves.");
+                            handled = true;
+                        }
+                        _ => {}
+                    }
+                    if handled {
+                        self.mark_dirty();
+                    }
+                    return Ok(false);
+                }
                 let mut handled = false;
                 match code {
                     KeyCode::Char('q') => {
@@ -643,41 +714,11 @@ impl AppState {
                 }
                 Ok(false)
             }
-            UiMode::RecoveryList => {
-                let mut handled = false;
-                match code {
-                    KeyCode::Esc => {
-                        self.mode = UiMode::Normal;
-                        handled = true;
-                    }
-                    KeyCode::Enter => {
-                        self.start_recovery_rename()?;
-                        handled = true;
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        self.move_recovery_down();
-                        handled = true;
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        self.move_recovery_up();
-                        handled = true;
-                    }
-                    KeyCode::Char('r') => {
-                        self.with_busy("Refreshing recovery...", |s| s.load_recovery_routes())?;
-                        handled = true;
-                    }
-                    _ => {}
-                }
-                if handled {
-                    self.mark_dirty();
-                }
-                Ok(false)
-            }
             UiMode::RecoveryRename { buffer, .. } => {
                 let mut handled = false;
                 match code {
                     KeyCode::Esc => {
-                        self.mode = UiMode::RecoveryList;
+                        self.mode = UiMode::Normal;
                         handled = true;
                     }
                     KeyCode::Enter => {
@@ -970,13 +1011,18 @@ impl AppState {
     }
 
     fn start_recovery_list(&mut self) -> Result<()> {
+        if self.recovery_view {
+            self.recovery_view = false;
+            return Ok(());
+        }
         self.with_busy("Loading recovery...", |s| s.load_recovery_routes())?;
         if self.recovery_routes.is_empty() {
             self.log_info("No recovery snapshots.");
-            self.mode = UiMode::Normal;
+            self.recovery_view = false;
             return Ok(());
         }
-        self.mode = UiMode::RecoveryList;
+        self.focus = Focus::Routes;
+        self.recovery_view = true;
         Ok(())
     }
 
@@ -1062,6 +1108,7 @@ impl AppState {
                 Ok(()) => {
                     discarded = true;
                     s.log_info("Discarded uncommitted changes (recovery snapshot created).");
+                    s.follow_current_route = true;
                     s.refresh()?;
                 }
                 Err(err) => {
@@ -1499,6 +1546,7 @@ impl AppState {
                 Ok(()) => {
                     s.log_info(format!("Recovered to route '{}'", new_name));
                     s.follow_current_route = true;
+                    s.recovery_view = false;
                     s.refresh()?;
                 }
                 Err(err) => {
@@ -1515,6 +1563,7 @@ impl AppState {
             match manager.discard_changes() {
                 Ok(()) => {
                     s.log_info("Discarded uncommitted changes (recovery snapshot created).");
+                    s.follow_current_route = true;
                     s.refresh()?;
                 }
                 Err(err) => {
@@ -1648,14 +1697,20 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
         )
         .split(f.size());
 
+    let recovery_tag = if app.in_recovery_mode() {
+        " · Recovery Mode"
+    } else {
+        ""
+    };
     let mut header_text = format!(
-        "gitsave TUI · {} · 路线: {} · Autosave: {} ({}s) · 刷新:{:>3}s",
+        "gitsave TUI · {} · 路线: {}{} · Autosave: {} ({}s) · 刷新:{:>3}s",
         app.save_dir.display(),
         if app.status.current_route.is_empty() {
             "(unknown)"
         } else {
             &app.status.current_route
         },
+        recovery_tag,
         if app.autosave.enabled { "ON" } else { "OFF" },
         app.autosave.interval,
         app.last_refresh.elapsed().as_secs()
@@ -1737,12 +1792,34 @@ fn draw_routes_panel(f: &mut Frame, area: Rect, app: &AppState) {
         .constraints([Constraint::Min(5), Constraint::Length(5)].as_ref())
         .split(area);
 
+    let recovery_mode = app.in_recovery_mode();
     let routes_block = Block::default()
         .borders(Borders::ALL)
-        .title("Routes")
+        .title(if recovery_mode {
+            "Recovery Routes"
+        } else {
+            "Routes"
+        })
         .border_style(panel_border_style(app.focus == Focus::Routes));
 
-    let route_items: Vec<ListItem> = if app.routes.is_empty() {
+    let route_items: Vec<ListItem> = if recovery_mode {
+        if app.recovery_routes.is_empty() {
+            vec![ListItem::new("No recovery snapshots")]
+        } else {
+            app.recovery_routes
+                .iter()
+                .map(|route| {
+                    let short_hash: String = route.name.chars().take(7).collect();
+                    let latest = route
+                        .latest_save
+                        .as_ref()
+                        .map(|s| format!(" · {}", s.message))
+                        .unwrap_or_default();
+                    ListItem::new(format!("  {}{}", short_hash, latest))
+                })
+                .collect()
+        }
+    } else if app.routes.is_empty() {
         vec![ListItem::new("No routes yet")]
     } else {
         app.routes
@@ -1769,38 +1846,57 @@ fn draw_routes_panel(f: &mut Frame, area: Rect, app: &AppState) {
         );
 
     let mut route_state = ListState::default();
-    if !app.routes.is_empty() {
+    if recovery_mode {
+        if !app.recovery_routes.is_empty() {
+            route_state.select(Some(app.recovery_index));
+        }
+    } else if !app.routes.is_empty() {
         route_state.select(Some(app.route_index));
     }
     f.render_stateful_widget(routes_list, panel_chunks[0], &mut route_state);
 
-    let autosave_lines = vec![
-        Line::from(format!(
-            "Status : {}",
-            if app.autosave.enabled {
-                "Enabled"
-            } else {
-                "Disabled"
-            }
-        )),
-        Line::from(format!("Interval: {}s", app.autosave.interval)),
-        Line::from(format!("Max saves: {}", app.autosave.max_count)),
-        Line::from(match app.autosave.last_save_time {
-            Some(ts) => format!(
-                "Last save: {}",
-                chrono::DateTime::from_timestamp(ts, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            ),
-            None => "Last save: never".to_string(),
-        }),
-    ];
+    let (aux_title, aux_lines) = if recovery_mode {
+        (
+            "Recovery",
+            vec![
+                Line::from("Enter: restore snapshot"),
+                Line::from("Esc: exit recovery"),
+                Line::from("r: refresh list"),
+                Line::from("Rename after restore"),
+            ],
+        )
+    } else {
+        (
+            "Autosave",
+            vec![
+                Line::from(format!(
+                    "Status : {}",
+                    if app.autosave.enabled {
+                        "Enabled"
+                    } else {
+                        "Disabled"
+                    }
+                )),
+                Line::from(format!("Interval: {}s", app.autosave.interval)),
+                Line::from(format!("Max saves: {}", app.autosave.max_count)),
+                Line::from(match app.autosave.last_save_time {
+                    Some(ts) => format!(
+                        "Last save: {}",
+                        chrono::DateTime::from_timestamp(ts, 0)
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .unwrap_or_else(|| "unknown".to_string())
+                    ),
+                    None => "Last save: never".to_string(),
+                }),
+            ],
+        )
+    };
 
-    let autosave_block = Block::default().borders(Borders::ALL).title("Autosave");
-    let autosave_widget = Paragraph::new(autosave_lines)
-        .block(autosave_block)
+    let aux_block = Block::default().borders(Borders::ALL).title(aux_title);
+    let aux_widget = Paragraph::new(aux_lines)
+        .block(aux_block)
         .wrap(Wrap { trim: true });
-    f.render_widget(autosave_widget, panel_chunks[1]);
+    f.render_widget(aux_widget, panel_chunks[1]);
 }
 
 fn draw_history_panel(f: &mut Frame, area: Rect, app: &AppState) {
@@ -2072,29 +2168,6 @@ impl ModalOverlay {
                 ];
                 Some(Self {
                     title: "Amend Message".to_string(),
-                    lines,
-                })
-            }
-            UiMode::RecoveryList => {
-                let mut lines = Vec::new();
-                if app.recovery_routes.is_empty() {
-                    lines.push(Line::from("No recovery snapshots."));
-                    lines.push(Line::from("Esc = close"));
-                } else {
-                    lines.push(Line::from("Select a recovery snapshot to restore."));
-                    for (idx, route) in app.recovery_routes.iter().enumerate() {
-                        let marker = if idx == app.recovery_index { "> " } else { "  " };
-                        let detail = route
-                            .latest_save
-                            .as_ref()
-                            .map(|save| format!(" - {}", save.message))
-                            .unwrap_or_default();
-                        lines.push(Line::from(format!("{}{}{}", marker, route.name, detail)));
-                    }
-                    lines.push(Line::from("Enter = recover · Esc = cancel · r = refresh"));
-                }
-                Some(Self {
-                    title: "Recovery Mode".to_string(),
                     lines,
                 })
             }
