@@ -72,6 +72,45 @@ impl Git2Core {
         })
     }
 
+    pub fn create_recovery_snapshot(&mut self, message: &str) -> Result<Oid> {
+        let mut index = self.repo.index().map_err(SaveError::Repository)?;
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .map_err(SaveError::Repository)?;
+        let tree_id = index.write_tree().map_err(SaveError::Repository)?;
+        index.write().map_err(SaveError::Repository)?;
+
+        let tree = self
+            .repo
+            .find_tree(tree_id)
+            .map_err(SaveError::Repository)?;
+
+        let sig = self.repo.signature().map_err(SaveError::Repository)?;
+        let head = self.repo.head().ok();
+        let parent_commit = head.and_then(|h| h.peel_to_commit().ok());
+
+        let mut parents: Vec<&Commit> = Vec::new();
+        if let Some(ref commit) = parent_commit {
+            parents.push(commit);
+        }
+
+        let commit_oid = self
+            .repo
+            .commit(None, &sig, &sig, message, &tree, &parents)
+            .map_err(SaveError::Repository)?;
+
+        let commit = self
+            .repo
+            .find_commit(commit_oid)
+            .map_err(SaveError::Repository)?;
+        let branch_name = commit_oid.to_string();
+        self.repo
+            .branch(&branch_name, &commit, false)
+            .map_err(SaveError::Repository)?;
+
+        Ok(commit_oid)
+    }
+
     pub fn checkout(&mut self, target: &str) -> Result<()> {
         let commit = self.find_commit(target)?;
 
@@ -104,6 +143,32 @@ impl Git2Core {
             .map_err(SaveError::Repository)?;
 
         Ok(())
+    }
+
+    pub fn amend_head_message(&mut self, message: &str) -> Result<SaveResult> {
+        let head = self.repo.head().map_err(SaveError::Repository)?;
+        let commit = head.peel_to_commit().map_err(SaveError::Repository)?;
+        let tree = commit.tree().map_err(SaveError::Repository)?;
+        let sig = self.repo.signature().map_err(SaveError::Repository)?;
+
+        let commit_oid = commit
+            .amend(
+                Some("HEAD"),
+                Some(&sig),
+                Some(&sig),
+                None,
+                Some(message),
+                Some(&tree),
+            )
+            .map_err(SaveError::Repository)?;
+
+        Ok(SaveResult {
+            oid: commit_oid.to_string(),
+            short_oid: commit_oid.to_string()[..7].to_string(),
+            message: message.to_string(),
+            changed_files: 0,
+            timestamp: Utc::now(),
+        })
     }
 
     pub fn discard_changes(&mut self) -> Result<()> {

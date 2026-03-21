@@ -22,7 +22,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use crate::core::{RouteInfo, SaveEntry, SaveResult, SaveStatus};
 use crate::error::SaveError;
 use crate::git::Git2Core;
-use crate::manager::{AutoSaveConfig, ConfigManager, RouteManager, SaveManager};
+use crate::manager::{AutoSaveConfig, ConfigManager, RouteManager, SaveManager, is_recovery_branch_name};
 
 const AUTO_REFRESH_SECS: u64 = 10;
 const BUSY_REDRAW_MS: u64 = 500;
@@ -136,6 +136,18 @@ enum UiMode {
         buffer: String,
         action: PendingAction,
     },
+    AmendPrompt {
+        buffer: String,
+    },
+    RecoveryList,
+    RecoveryRename {
+        buffer: String,
+        target: RouteInfo,
+    },
+    RenameRoute {
+        buffer: String,
+        target: RouteInfo,
+    },
     CreateRoute {
         buffer: String,
         switch: bool,
@@ -169,6 +181,10 @@ enum PendingAction {
         name: String,
         force: bool,
     },
+    RecoverRoute {
+        old_name: String,
+        new_name: String,
+    },
     DiscardChanges,
 }
 
@@ -194,6 +210,8 @@ struct AppState {
     save_dir: PathBuf,
     routes: Vec<RouteInfo>,
     route_index: usize,
+    recovery_routes: Vec<RouteInfo>,
+    recovery_index: usize,
     all_history: Vec<SaveEntry>,
     history: Vec<SaveEntry>,
     history_index: usize,
@@ -216,6 +234,8 @@ impl AppState {
             save_dir,
             routes: Vec::new(),
             route_index: 0,
+            recovery_routes: Vec::new(),
+            recovery_index: 0,
             all_history: Vec::new(),
             history: Vec::new(),
             history_index: 0,
@@ -244,6 +264,8 @@ impl AppState {
     fn refresh(&mut self) -> Result<()> {
         let core = Git2Core::open(&self.save_dir)?;
         self.routes = core.list_routes()?;
+        self.routes
+            .retain(|route| !is_recovery_branch_name(&route.name));
         if self.routes.is_empty() {
             self.route_index = 0;
         } else if self.route_index >= self.routes.len() {
@@ -262,6 +284,7 @@ impl AppState {
         }
 
         let mut history = core.get_history()?;
+        history.retain(|entry| !is_recovery_branch_name(&entry.route));
         history.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         self.all_history = history;
         if let Err(err) = self.update_route_history_ids(&core) {
@@ -272,6 +295,19 @@ impl AppState {
         self.autosave = ConfigManager::new(&self.save_dir).load_auto_save_config();
         self.last_refresh = Instant::now();
         self.mark_dirty();
+        Ok(())
+    }
+
+    fn load_recovery_routes(&mut self) -> Result<()> {
+        let core = Git2Core::open(&self.save_dir)?;
+        let mut routes = core.list_routes()?;
+        routes.retain(|route| is_recovery_branch_name(&route.name));
+        self.recovery_routes = routes;
+        if self.recovery_routes.is_empty() {
+            self.recovery_index = 0;
+        } else if self.recovery_index >= self.recovery_routes.len() {
+            self.recovery_index = self.recovery_routes.len() - 1;
+        }
         Ok(())
     }
 
@@ -336,12 +372,14 @@ impl AppState {
             self.all_history.clone()
         };
 
-        self.history = filtered;
-        if self.history.is_empty() {
+        if !self.selected_route_is_current() {
+            self.history = filtered.into_iter().take(1).collect();
             self.history_index = 0;
             return;
         }
-        if !self.selected_route_is_current() {
+
+        self.history = filtered;
+        if self.history.is_empty() {
             self.history_index = 0;
             return;
         }
@@ -396,6 +434,19 @@ impl AppState {
         }
     }
 
+    fn move_recovery_down(&mut self) {
+        if !self.recovery_routes.is_empty() && self.recovery_index + 1 < self.recovery_routes.len()
+        {
+            self.recovery_index += 1;
+        }
+    }
+
+    fn move_recovery_up(&mut self) {
+        if self.recovery_index > 0 {
+            self.recovery_index -= 1;
+        }
+    }
+
     fn page_down(&mut self) {
         if self.focus == Focus::History && !self.history.is_empty() {
             let jump = (self.history.len() / 5).max(1);
@@ -427,6 +478,10 @@ impl AppState {
                         self.with_busy("Refreshing...", |s| s.refresh())?;
                         handled = true;
                     }
+                    KeyCode::Char('R') => {
+                        self.start_recovery_list()?;
+                        handled = true;
+                    }
                     KeyCode::Char('s') => {
                         self.start_save_prompt(SaveMode::Stable)?;
                         handled = true;
@@ -447,6 +502,10 @@ impl AppState {
                         self.start_route_prompt(false);
                         handled = true;
                     }
+                    KeyCode::Char('n') => {
+                        self.start_route_rename()?;
+                        handled = true;
+                    }
                     KeyCode::Char('C') => {
                         self.start_route_prompt(true);
                         handled = true;
@@ -461,6 +520,10 @@ impl AppState {
                     }
                     KeyCode::Char('d') => {
                         self.request_discard_changes();
+                        handled = true;
+                    }
+                    KeyCode::Char('m') => {
+                        self.start_amend_prompt()?;
                         handled = true;
                     }
                     KeyCode::Enter => {
@@ -534,6 +597,120 @@ impl AppState {
                     }
                     KeyCode::Enter => {
                         self.confirm_rollback_prompt()?;
+                        handled = true;
+                    }
+                    KeyCode::Backspace => {
+                        buffer.pop();
+                        handled = true;
+                    }
+                    KeyCode::Char(ch) => {
+                        if is_valid_route_char(ch) {
+                            buffer.push(ch);
+                            handled = true;
+                        }
+                    }
+                    _ => {}
+                }
+                if handled {
+                    self.mark_dirty();
+                }
+                Ok(false)
+            }
+            UiMode::AmendPrompt { buffer } => {
+                let mut handled = false;
+                match code {
+                    KeyCode::Esc => {
+                        self.log_info("Amend cancelled");
+                        self.mode = UiMode::Normal;
+                        handled = true;
+                    }
+                    KeyCode::Enter => {
+                        self.confirm_amend_prompt()?;
+                        handled = true;
+                    }
+                    KeyCode::Backspace => {
+                        buffer.pop();
+                        handled = true;
+                    }
+                    KeyCode::Char(ch) => {
+                        buffer.push(ch);
+                        handled = true;
+                    }
+                    _ => {}
+                }
+                if handled {
+                    self.mark_dirty();
+                }
+                Ok(false)
+            }
+            UiMode::RecoveryList => {
+                let mut handled = false;
+                match code {
+                    KeyCode::Esc => {
+                        self.mode = UiMode::Normal;
+                        handled = true;
+                    }
+                    KeyCode::Enter => {
+                        self.start_recovery_rename()?;
+                        handled = true;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.move_recovery_down();
+                        handled = true;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.move_recovery_up();
+                        handled = true;
+                    }
+                    KeyCode::Char('r') => {
+                        self.with_busy("Refreshing recovery...", |s| s.load_recovery_routes())?;
+                        handled = true;
+                    }
+                    _ => {}
+                }
+                if handled {
+                    self.mark_dirty();
+                }
+                Ok(false)
+            }
+            UiMode::RecoveryRename { buffer, .. } => {
+                let mut handled = false;
+                match code {
+                    KeyCode::Esc => {
+                        self.mode = UiMode::RecoveryList;
+                        handled = true;
+                    }
+                    KeyCode::Enter => {
+                        self.confirm_recovery_rename()?;
+                        handled = true;
+                    }
+                    KeyCode::Backspace => {
+                        buffer.pop();
+                        handled = true;
+                    }
+                    KeyCode::Char(ch) => {
+                        if is_valid_route_char(ch) {
+                            buffer.push(ch);
+                            handled = true;
+                        }
+                    }
+                    _ => {}
+                }
+                if handled {
+                    self.mark_dirty();
+                }
+                Ok(false)
+            }
+            UiMode::RenameRoute { buffer, .. } => {
+                let mut handled = false;
+                match code {
+                    KeyCode::Esc => {
+                        self.log_info("Rename cancelled");
+                        self.mode = UiMode::Normal;
+                        handled = true;
+                    }
+                    KeyCode::Enter => {
+                        self.confirm_route_rename()?;
                         handled = true;
                     }
                     KeyCode::Backspace => {
@@ -716,6 +893,18 @@ impl AppState {
         Ok(())
     }
 
+    fn start_amend_prompt(&mut self) -> Result<()> {
+        self.refresh_status_only()?;
+        if self.status.has_uncommitted_changes {
+            self.log_info("Working tree dirty; save or discard changes first.");
+            return Ok(());
+        }
+        self.mode = UiMode::AmendPrompt {
+            buffer: String::new(),
+        };
+        Ok(())
+    }
+
     fn confirm_save_prompt(&mut self) -> Result<()> {
         let (message, mode) = match &self.mode {
             UiMode::SavePrompt { buffer, mode } => (buffer.trim().to_string(), *mode),
@@ -735,6 +924,19 @@ impl AppState {
             SaveMode::Stable => self.perform_save_stable(request),
             SaveMode::Force => self.perform_save_force(request),
         }
+    }
+
+    fn confirm_amend_prompt(&mut self) -> Result<()> {
+        let message = match &self.mode {
+            UiMode::AmendPrompt { buffer } => buffer.trim().to_string(),
+            _ => return Ok(()),
+        };
+        self.mode = UiMode::Normal;
+        if message.is_empty() {
+            self.log_error("Message cannot be empty.");
+            return Ok(());
+        }
+        self.perform_amend(message)
     }
 
     fn start_rollback_prompt(&mut self, action: PendingAction) -> Result<()> {
@@ -767,6 +969,78 @@ impl AppState {
         }
     }
 
+    fn start_recovery_list(&mut self) -> Result<()> {
+        self.with_busy("Loading recovery...", |s| s.load_recovery_routes())?;
+        if self.recovery_routes.is_empty() {
+            self.log_info("No recovery snapshots.");
+            self.mode = UiMode::Normal;
+            return Ok(());
+        }
+        self.mode = UiMode::RecoveryList;
+        Ok(())
+    }
+
+    fn start_recovery_rename(&mut self) -> Result<()> {
+        let target = match self.recovery_routes.get(self.recovery_index) {
+            Some(route) => route.clone(),
+            None => {
+                self.log_error("No recovery snapshot selected.");
+                return Ok(());
+            }
+        };
+        self.mode = UiMode::RecoveryRename {
+            buffer: String::new(),
+            target,
+        };
+        Ok(())
+    }
+
+    fn confirm_recovery_rename(&mut self) -> Result<()> {
+        let (buffer, target) = match &self.mode {
+            UiMode::RecoveryRename { buffer, target } => (buffer.trim().to_string(), target.clone()),
+            _ => return Ok(()),
+        };
+        self.mode = UiMode::Normal;
+        self.refresh_status_only()?;
+
+        let short_hash = target.name.chars().take(7).collect::<String>();
+        let default_name = format!("recovery-{}", short_hash);
+        let new_name = if buffer.is_empty() {
+            default_name
+        } else {
+            buffer
+        };
+
+        if !is_valid_route_name(&new_name) {
+            self.log_error("Invalid route name. Use letters, digits, '-', '_', '/'.");
+            return Ok(());
+        }
+
+        let core = Git2Core::open(&self.save_dir)?;
+        let routes = core.list_routes()?;
+        if routes.iter().any(|route| route.name == new_name) {
+            self.log_error(format!("Route '{}' already exists.", new_name));
+            return Ok(());
+        }
+
+        let action = PendingAction::RecoverRoute {
+            old_name: target.name,
+            new_name,
+        };
+
+        let prompt = "Recover this snapshot and switch to the route?";
+        if self.status.has_uncommitted_changes {
+            self.mode = UiMode::ResolveDirty {
+                prompt: prompt.to_string(),
+                action,
+            };
+        } else {
+            self.execute_pending_action(action)?;
+        }
+
+        Ok(())
+    }
+
     fn save_then_action(&mut self, action: PendingAction) -> Result<()> {
         self.refresh_status_only()?;
         if !self.status.has_uncommitted_changes {
@@ -787,7 +1061,7 @@ impl AppState {
             match manager.discard_changes() {
                 Ok(()) => {
                     discarded = true;
-                    s.log_info("Discarded uncommitted changes.");
+                    s.log_info("Discarded uncommitted changes (recovery snapshot created).");
                     s.refresh()?;
                 }
                 Err(err) => {
@@ -843,6 +1117,21 @@ impl AppState {
         }
     }
 
+    fn start_route_rename(&mut self) -> Result<()> {
+        let target = match self.routes.get(self.route_index) {
+            Some(route) => route.clone(),
+            None => {
+                self.log_error("No route selected.");
+                return Ok(());
+            }
+        };
+        self.mode = UiMode::RenameRoute {
+            buffer: String::new(),
+            target,
+        };
+        Ok(())
+    }
+
     fn start_route_prompt(&mut self, switch: bool) {
         self.mode = UiMode::CreateRoute {
             buffer: String::new(),
@@ -876,6 +1165,51 @@ impl AppState {
             self.mode = UiMode::ConfirmAction { prompt, action };
         }
         Ok(())
+    }
+
+    fn confirm_route_rename(&mut self) -> Result<()> {
+        let (buffer, target) = match &self.mode {
+            UiMode::RenameRoute { buffer, target } => (buffer.trim().to_string(), target.clone()),
+            _ => return Ok(()),
+        };
+        self.mode = UiMode::Normal;
+
+        if buffer.is_empty() {
+            self.log_error("Route name cannot be empty.");
+            return Ok(());
+        }
+        if !is_valid_route_name(&buffer) {
+            self.log_error("Invalid route name. Use letters, digits, '-', '_', '/'.");
+            return Ok(());
+        }
+        if buffer == target.name {
+            self.log_info("Route name unchanged.");
+            return Ok(());
+        }
+
+        let core = Git2Core::open(&self.save_dir)?;
+        let routes = core.list_routes()?;
+        if routes.iter().any(|route| route.name == buffer) {
+            self.log_error(format!("Route '{}' already exists.", buffer));
+            return Ok(());
+        }
+
+        self.with_busy("Renaming route...", |s| {
+            let mut manager = RouteManager::new(Git2Core::open(&s.save_dir)?);
+            match manager.rename_route(&target.name, &buffer) {
+                Ok(()) => {
+                    s.log_info(format!("Renamed route '{}' to '{}'", target.name, buffer));
+                    s.refresh()?;
+                }
+                Err(err) => {
+                    s.log_error(format!(
+                        "Failed to rename route '{}' to '{}': {}",
+                        target.name, buffer, err
+                    ));
+                }
+            }
+            Ok(())
+        })
     }
 
     fn request_route_switch(&mut self, force: bool) {
@@ -920,7 +1254,7 @@ impl AppState {
             return;
         }
         self.mode = UiMode::ConfirmAction {
-            prompt: "Discard all uncommitted changes? This removes untracked files.".to_string(),
+            prompt: "Discard all uncommitted changes? This removes untracked files and records a recovery snapshot.".to_string(),
             action: PendingAction::DiscardChanges,
         };
     }
@@ -932,6 +1266,9 @@ impl AppState {
                 self.perform_route_creation(&name, switch)
             }
             PendingAction::SwitchRoute { name, force } => self.perform_route_switch(&name, force),
+            PendingAction::RecoverRoute { old_name, new_name } => {
+                self.perform_recovery_route(&old_name, &new_name)
+            }
             PendingAction::DiscardChanges => self.perform_discard_changes(),
         }
     }
@@ -1014,6 +1351,25 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    fn perform_amend(&mut self, message: String) -> Result<()> {
+        self.with_busy("Updating message...", |s| {
+            let mut manager = SaveManager::new(Git2Core::open(&s.save_dir)?);
+            match manager.amend_head_message(&message) {
+                Ok(result) => {
+                    s.log_info(format!(
+                        "Updated latest save message ({} - {})",
+                        result.short_oid, result.message
+                    ));
+                    s.refresh()?;
+                }
+                Err(err) => {
+                    s.log_error(format!("Amend failed: {}", err));
+                }
+            }
+            Ok(())
+        })
     }
 
     fn perform_rollback(
@@ -1132,12 +1488,33 @@ impl AppState {
         })
     }
 
+    fn perform_recovery_route(&mut self, old_name: &str, new_name: &str) -> Result<()> {
+        self.with_busy("Recovering snapshot...", |s| {
+            let mut core = Git2Core::open(&s.save_dir)?;
+            if let Err(err) = core.rename_route(old_name, new_name) {
+                s.log_error(format!("Failed to rename recovery route: {}", err));
+                return Ok(());
+            }
+            match core.switch_route(new_name) {
+                Ok(()) => {
+                    s.log_info(format!("Recovered to route '{}'", new_name));
+                    s.follow_current_route = true;
+                    s.refresh()?;
+                }
+                Err(err) => {
+                    s.log_error(format!("Failed to switch to route '{}': {}", new_name, err));
+                }
+            }
+            Ok(())
+        })
+    }
+
     fn perform_discard_changes(&mut self) -> Result<()> {
         self.with_busy("Discarding changes...", |s| {
             let mut manager = SaveManager::new(Git2Core::open(&s.save_dir)?);
             match manager.discard_changes() {
                 Ok(()) => {
-                    s.log_info("Discarded uncommitted changes.");
+                    s.log_info("Discarded uncommitted changes (recovery snapshot created).");
                     s.refresh()?;
                 }
                 Err(err) => {
@@ -1195,6 +1572,9 @@ impl AppState {
             }
             PendingAction::SwitchRoute { name, .. } => {
                 format!("before switch route {}", name)
+            }
+            PendingAction::RecoverRoute { new_name, .. } => {
+                format!("before recover route {}", new_name)
             }
             PendingAction::DiscardChanges => "before discard".to_string(),
         };
@@ -1316,12 +1696,18 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
         Span::raw(" page  "),
         Span::styled("s/S", Style::default().fg(Color::Yellow)),
         Span::raw(": save  "),
+        Span::styled("m", Style::default().fg(Color::Yellow)),
+        Span::raw(": amend  "),
         Span::styled("l/L", Style::default().fg(Color::Yellow)),
         Span::raw(": rollback  "),
         Span::styled("c/C", Style::default().fg(Color::Yellow)),
         Span::raw(": create  "),
+        Span::styled("n", Style::default().fg(Color::Yellow)),
+        Span::raw(": rename  "),
         Span::styled("x/X", Style::default().fg(Color::Yellow)),
         Span::raw(": switch  "),
+        Span::styled("R", Style::default().fg(Color::Yellow)),
+        Span::raw(": recovery  "),
         Span::styled("d", Style::default().fg(Color::Yellow)),
         Span::raw(": discard  "),
         Span::styled("Tab", Style::default().fg(Color::Yellow)),
@@ -1582,6 +1968,10 @@ fn is_valid_route_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/')
 }
 
+fn is_valid_route_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(is_valid_route_char)
+}
+
 struct ModalOverlay {
     title: String,
     lines: Vec<Line<'static>>,
@@ -1671,6 +2061,66 @@ impl ModalOverlay {
                 ];
                 Some(Self {
                     title: title.to_string(),
+                    lines,
+                })
+            }
+            UiMode::AmendPrompt { buffer } => {
+                let lines = vec![
+                    Line::from("Edit latest save message (HEAD only)."),
+                    Line::from(format!("> {}", buffer)),
+                    Line::from("Enter = confirm · Esc = cancel"),
+                ];
+                Some(Self {
+                    title: "Amend Message".to_string(),
+                    lines,
+                })
+            }
+            UiMode::RecoveryList => {
+                let mut lines = Vec::new();
+                if app.recovery_routes.is_empty() {
+                    lines.push(Line::from("No recovery snapshots."));
+                    lines.push(Line::from("Esc = close"));
+                } else {
+                    lines.push(Line::from("Select a recovery snapshot to restore."));
+                    for (idx, route) in app.recovery_routes.iter().enumerate() {
+                        let marker = if idx == app.recovery_index { "> " } else { "  " };
+                        let detail = route
+                            .latest_save
+                            .as_ref()
+                            .map(|save| format!(" - {}", save.message))
+                            .unwrap_or_default();
+                        lines.push(Line::from(format!("{}{}{}", marker, route.name, detail)));
+                    }
+                    lines.push(Line::from("Enter = recover · Esc = cancel · r = refresh"));
+                }
+                Some(Self {
+                    title: "Recovery Mode".to_string(),
+                    lines,
+                })
+            }
+            UiMode::RecoveryRename { buffer, target } => {
+                let short_hash = target.name.chars().take(7).collect::<String>();
+                let default_name = format!("recovery-{}", short_hash);
+                let lines = vec![
+                    Line::from("Rename recovery snapshot before switching."),
+                    Line::from(format!("> {}", buffer)),
+                    Line::from(format!("Empty = {}", default_name)),
+                    Line::from("Enter = confirm · Esc = back"),
+                ];
+                Some(Self {
+                    title: "Recover Snapshot".to_string(),
+                    lines,
+                })
+            }
+            UiMode::RenameRoute { buffer, target } => {
+                let lines = vec![
+                    Line::from(format!("Rename route '{}'.", target.name)),
+                    Line::from(format!("> {}", buffer)),
+                    Line::from("Allowed: letters, digits, -, _, /."),
+                    Line::from("Enter = confirm · Esc = cancel"),
+                ];
+                Some(Self {
+                    title: "Rename Route".to_string(),
                     lines,
                 })
             }

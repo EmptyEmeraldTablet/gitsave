@@ -40,6 +40,21 @@ gitsave save [-m MESSAGE] [DESC]
 gitsave save "击败第一个Boss"
 ```
 
+## amend
+
+修改最新存档描述（仅 HEAD）。
+
+```bash
+gitsave amend [-m MESSAGE] [DESC]
+```
+
+- `-m, --message`：指定新描述
+- `DESC`：可选的新描述（与 `-m` 二选一即可）
+
+行为：
+- 仅允许修改当前 HEAD 的提交信息。
+- 工作区必须干净（有未保存更改会拒绝）。
+
 ## load
 
 回滚到存档。回滚时会在目标提交上创建并切换到新路线。
@@ -68,6 +83,21 @@ gitsave load --route ending-a --tag "最终存档"
 - 回滚总是创建新路线并切换过去，原路线不受影响。
 - 脏工作区下默认拒绝回滚，需显式选择“保存/丢弃/取消”后继续。
 
+## recovery
+
+恢复“丢弃快照”路线。
+
+```bash
+gitsave recovery --list
+gitsave recovery <HASH_PREFIX> [--name NAME]
+```
+
+行为：
+- 执行丢弃操作（discard）时会自动生成“丢弃快照”路线。
+- `recovery --list` 仅列出这些快照路线。
+- 进入恢复时需要重命名；名称为空时默认 `recovery-<short_hash>`。
+- 恢复后会切换到新路线，快照不再出现在恢复列表中。
+
 ## status
 
 查看当前仓库状态。
@@ -86,6 +116,9 @@ gitsave history [OPTIONS]
 
 - `-v, --verbose`：显示详细时间信息
 - `-r, --route ROUTE`：筛选特定路线的历史
+
+说明：
+- 默认隐藏“丢弃快照”路线记录，可通过 `gitsave recovery --list` 查看。
 
 ## compare
 

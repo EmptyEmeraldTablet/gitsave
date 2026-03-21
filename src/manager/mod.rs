@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
+use chrono::Local;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::core::{CompareResult, RouteInfo, SaveEntry, SaveResult, SaveStatus};
@@ -11,6 +12,10 @@ use crate::git::Git2Core;
 
 const STABILITY_WINDOW_MS: u64 = 1200;
 const STABILITY_MAX_ATTEMPTS: u32 = 3;
+
+pub fn is_recovery_branch_name(name: &str) -> bool {
+    name.len() == 40 && name.chars().all(|ch| ch.is_ascii_hexdigit())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileSignature {
@@ -141,7 +146,25 @@ impl SaveManager {
         self.core.commit(message)
     }
 
+    pub fn amend_head_message(&mut self, message: &str) -> Result<SaveResult> {
+        self.core.amend_head_message(message)
+    }
+
     pub fn discard_changes(&mut self) -> Result<()> {
+        let status = self.core.get_status()?;
+        if !status.has_uncommitted_changes {
+            return Ok(());
+        }
+
+        let route = if status.current_route.is_empty() {
+            "unknown"
+        } else {
+            status.current_route.as_str()
+        };
+        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+        let message = format!("[recovery] discard from {} {}", route, timestamp);
+        let _ = self.core.create_recovery_snapshot(&message)?;
+
         self.core.discard_changes()
     }
 

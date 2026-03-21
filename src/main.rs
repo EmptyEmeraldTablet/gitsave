@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use cli::{Cli, Commands, RouteCommands, parse_args};
 use error::SaveError;
 use git::Git2Core;
-use manager::{ConfigManager, RouteManager, SaveManager};
+use manager::{ConfigManager, RouteManager, SaveManager, is_recovery_branch_name};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -157,6 +157,29 @@ fn handle_save(save_dir: &Path, message: &str) -> Result<()> {
     Ok(())
 }
 
+fn handle_amend(save_dir: &Path, message: &str) -> Result<()> {
+    if message.trim().is_empty() {
+        eprintln!("[ERROR] Message cannot be empty.");
+        std::process::exit(1);
+    }
+
+    let core = Git2Core::open(save_dir).context("Failed to open repository")?;
+    let mut manager = SaveManager::new(core);
+    let status = manager.get_status()?;
+    if status.has_uncommitted_changes {
+        eprintln!("[ERROR] Working tree dirty. Save or discard changes first.");
+        std::process::exit(1);
+    }
+
+    let result = manager
+        .amend_head_message(message)
+        .context("Failed to amend latest save")?;
+    println!("[OK] Updated latest save message:");
+    println!("  ID: {}", result.short_oid);
+    println!("  Message: {}", result.message);
+    Ok(())
+}
+
 fn handle_load(
     save_dir: &Path,
     list: bool,
@@ -170,7 +193,8 @@ fn handle_load(
     let mut manager = SaveManager::new(core);
 
     if list {
-        let saves = manager.list_saves().context("Failed to list saves")?;
+        let mut saves = manager.list_saves().context("Failed to list saves")?;
+        saves.retain(|save| !is_recovery_branch_name(&save.route));
         println!("Available saves:");
         if saves.is_empty() {
             println!("  (no saves yet)");
@@ -251,7 +275,9 @@ fn handle_load(
         match manager.into_core().switch_create_route_at(id, &route_name) {
             Ok(()) => println!("Rolled back to save {} on route {}", id, route_name),
             Err(SaveError::SaveNotFound(target)) => {
-                let all_saves = SaveManager::new(Git2Core::open(save_dir)?).list_saves()?;
+                let mut all_saves =
+                    SaveManager::new(Git2Core::open(save_dir)?).list_saves()?;
+                all_saves.retain(|save| !is_recovery_branch_name(&save.route));
                 eprintln!("[ERROR] Save not found: {}", target);
                 if !all_saves.is_empty() {
                     eprintln!("\nAvailable saves:");
@@ -306,7 +332,8 @@ fn handle_status(save_dir: &Path) -> Result<()> {
 fn handle_history(save_dir: &Path, verbose: bool, _route: &Option<String>) -> Result<()> {
     let core = Git2Core::open(save_dir).context("Failed to open repository")?;
     let manager = SaveManager::new(core);
-    let history = manager.get_history().context("Failed to get history")?;
+    let mut history = manager.get_history().context("Failed to get history")?;
+    history.retain(|save| !is_recovery_branch_name(&save.route));
 
     for save in history {
         let marker = if save.is_current { "*" } else { " " };
@@ -316,6 +343,135 @@ fn handle_history(save_dir: &Path, verbose: bool, _route: &Option<String>) -> Re
         }
         println!();
     }
+    Ok(())
+}
+
+fn list_recovery_routes(save_dir: &Path) -> Result<Vec<core::RouteInfo>> {
+    let core = Git2Core::open(save_dir).context("Failed to open repository")?;
+    let manager = RouteManager::new(core);
+    let routes = manager.list_routes().context("Failed to list routes")?;
+    Ok(routes
+        .into_iter()
+        .filter(|route| is_recovery_branch_name(&route.name))
+        .collect())
+}
+
+fn resolve_recovery_route<'a>(
+    routes: &'a [core::RouteInfo],
+    input: &str,
+) -> Result<&'a core::RouteInfo> {
+    let matches: Vec<&core::RouteInfo> = routes
+        .iter()
+        .filter(|route| route.name.starts_with(input))
+        .collect();
+    match matches.len() {
+        0 => {
+            eprintln!("[ERROR] Recovery route not found: {}", input);
+            std::process::exit(1);
+        }
+        1 => Ok(matches[0]),
+        _ => {
+            eprintln!("[ERROR] Multiple recovery routes match '{}':", input);
+            for route in matches {
+                eprintln!("  {}", route.name);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn resolve_recovery_name(
+    explicit: &Option<String>,
+    default_name: &str,
+    action: &str,
+) -> Result<String> {
+    if let Some(name) = explicit {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Ok(default_name.to_string());
+        }
+        if !is_valid_route_name(trimmed) {
+            eprintln!("[ERROR] Invalid route name '{}'.", trimmed);
+            eprintln!("Allowed: letters, digits, '-', '_', '/'");
+            std::process::exit(1);
+        }
+        return Ok(trimmed.to_string());
+    }
+
+    loop {
+        eprint!(
+            "[INPUT] Enter new route name to {} (empty for {}): ",
+            action, default_name
+        );
+        io::stderr().flush().ok();
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read input")?;
+        let name = input.trim();
+        if name.is_empty() {
+            return Ok(default_name.to_string());
+        }
+        if is_valid_route_name(name) {
+            return Ok(name.to_string());
+        }
+        eprintln!("Route name may contain letters, digits, '-', '_', '/'.");
+    }
+}
+
+fn handle_recovery(
+    save_dir: &Path,
+    list: bool,
+    name: &Option<String>,
+    identifier: &Option<String>,
+) -> Result<()> {
+    let routes = list_recovery_routes(save_dir)?;
+    if list || identifier.is_none() {
+        if routes.is_empty() {
+            println!("No recovery routes.");
+            return Ok(());
+        }
+        println!("Recovery routes:");
+        for route in routes {
+            let detail = route
+                .latest_save
+                .as_ref()
+                .map(|s| format!(" - {} ({})", s.message, s.short_id))
+                .unwrap_or_default();
+            println!("  {}{}", route.name, detail);
+        }
+        return Ok(());
+    }
+
+    let target_input = identifier.as_ref().unwrap();
+    if routes.is_empty() {
+        eprintln!("[ERROR] No recovery routes available.");
+        std::process::exit(1);
+    }
+    let target = resolve_recovery_route(&routes, target_input)?;
+    let short_hash = target.name.chars().take(7).collect::<String>();
+    let default_name = format!("recovery-{}", short_hash);
+    let new_name = resolve_recovery_name(name, &default_name, "recover discard")?;
+
+    let all_routes = RouteManager::new(Git2Core::open(save_dir)?).list_routes()?;
+    if all_routes.iter().any(|route| route.name == new_name) {
+        eprintln!("[ERROR] Route '{}' already exists.", new_name);
+        std::process::exit(1);
+    }
+
+    let mut guard_manager = SaveManager::new(Git2Core::open(save_dir)?);
+    if !ensure_clean_for_action(&mut guard_manager, "switching to recovery route")? {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
+    let mut core = Git2Core::open(save_dir)?;
+    core.rename_route(&target.name, &new_name)
+        .context("Failed to rename recovery route")?;
+    core.switch_route(&new_name)
+        .context("Failed to switch to recovery route")?;
+
+    println!("[OK] Recovered to route: {}", new_name);
     Ok(())
 }
 
@@ -487,7 +643,10 @@ enum UnstableDecision {
 }
 
 fn confirm_discard_changes(message: &str) -> Result<bool> {
-    eprint!("[WARN] {} [y/N]: ", message);
+    eprint!(
+        "[WARN] {} A recovery snapshot will be created. [y/N]: ",
+        message
+    );
     io::stderr().flush().ok();
     let mut input = String::new();
     io::stdin()
@@ -503,7 +662,7 @@ fn prompt_dirty_decision(action: &str) -> Result<DirtyDecision> {
             "[WARN] Uncommitted changes detected. {} requires a clean working tree. ",
             action
         );
-        eprint!("Choose (s)ave, (d)iscard, (c)ancel: ");
+        eprint!("Choose (s)ave, (d)iscard (with recovery), (c)ancel: ");
         io::stderr().flush().ok();
         let mut input = String::new();
         io::stdin()
@@ -632,7 +791,8 @@ fn ensure_clean_for_action(manager: &mut SaveManager, action: &str) -> Result<bo
 }
 
 fn print_routes(manager: &RouteManager) -> Result<()> {
-    let routes = manager.list_routes().context("Failed to list routes")?;
+    let mut routes = manager.list_routes().context("Failed to list routes")?;
+    routes.retain(|route| !is_recovery_branch_name(&route.name));
     println!("Routes:");
     for route in routes {
         let current = if route.is_current { " (current)" } else { "" };
@@ -681,6 +841,13 @@ fn main() {
         Commands::Save { message, desc } => {
             let msg = message.clone().unwrap_or_else(|| desc.clone());
             if let Err(e) = handle_save(&save_dir, &msg) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Amend { message, desc } => {
+            let msg = message.clone().unwrap_or_else(|| desc.clone());
+            if let Err(e) = handle_amend(&save_dir, &msg) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -909,6 +1076,16 @@ fn main() {
         }
         Commands::Tui => {
             if let Err(e) = tui::run(&save_dir) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        Commands::Recovery {
+            list,
+            name,
+            identifier,
+        } => {
+            if let Err(e) = handle_recovery(&save_dir, *list, name, identifier) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }

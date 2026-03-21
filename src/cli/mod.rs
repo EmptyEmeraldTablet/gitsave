@@ -34,6 +34,15 @@ pub enum Commands {
         desc: String,
     },
 
+    #[command(about = "Rename the latest save message (HEAD only)")]
+    Amend {
+        #[arg(short, long)]
+        message: Option<String>,
+
+        #[arg(default_value = "")]
+        desc: String,
+    },
+
     #[command(about = "Roll back to a saved game state (creates a new route)")]
     Load {
         #[arg(short, long)]
@@ -122,6 +131,17 @@ pub enum Commands {
 
     #[command(about = "Launch the interactive TUI dashboard (experimental)")]
     Tui,
+
+    #[command(about = "Recovery mode (saved discards)")]
+    Recovery {
+        #[arg(short, long, action = clap::ArgAction::SetTrue)]
+        list: bool,
+
+        #[arg(short, long, value_name = "NAME")]
+        name: Option<String>,
+
+        identifier: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
