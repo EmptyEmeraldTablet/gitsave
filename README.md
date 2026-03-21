@@ -36,6 +36,7 @@ gitsave tui
 - **标签**：对关键节点打标，便于回滚与查找。
 
 ## TUI 概览
+<img width="1887" height="929" alt="image" src="https://github.com/user-attachments/assets/46515464-85aa-48aa-b644-1ed38d56ed11" />
 
 TUI 是首选交互方式，适合频繁保存/回滚场景：
 - Routes/History/Status/Notifications 四区布局，直观看到当前路线、历史与工作区状态。
