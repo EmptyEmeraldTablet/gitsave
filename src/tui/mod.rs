@@ -353,7 +353,8 @@ fn run_path_picker(
                             }
                             KeyCode::Char('e') => {
                                 if let Some(path) = &state.manage_target {
-                                    state.export_path = default_export_path(path);
+                                    state.export_dir = Some(export_base_dir(path));
+                                    state.export_path = default_export_name(path);
                                     state.mode = PickerMode::ExportInput;
                                     state.clear_error();
                                     state.mark_dirty();
@@ -422,11 +423,24 @@ fn run_path_picker(
                                         continue;
                                     }
                                 };
-                                let output = PathBuf::from(state.export_path.trim());
-                                match export_archive(&target, &output) {
-                                    Ok(()) => {
+                                let export_dir = match state.export_dir.clone() {
+                                    Some(dir) => dir,
+                                    None => {
                                         state.mode = PickerMode::Manage;
-                                        state.set_error("Export complete".to_string());
+                                        state.set_error("Export directory unavailable".to_string());
+                                        continue;
+                                    }
+                                };
+                                match validate_export_name(&state.export_path) {
+                                    Ok(file_name) => {
+                                        let output = export_dir.join(file_name);
+                                        match export_archive(&target, &output) {
+                                            Ok(()) => {
+                                                state.mode = PickerMode::Manage;
+                                                state.set_error("Export complete".to_string());
+                                            }
+                                            Err(err) => state.set_error(err),
+                                        }
                                     }
                                     Err(err) => state.set_error(err),
                                 }
@@ -515,6 +529,11 @@ fn has_git_dir(path: &Path) -> bool {
     git_dir.exists() && git_dir.is_dir()
 }
 
+fn has_gitsave_config(path: &Path) -> bool {
+    let config = path.join("gitsave.toml");
+    config.exists() && config.is_file()
+}
+
 fn cleanup_repo(path: &Path) -> std::result::Result<(), String> {
     if !path.exists() || !path.is_dir() {
         return Err("Path is not a directory".to_string());
@@ -572,17 +591,28 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn default_export_path(path: &Path) -> String {
-    let parent = path.parent().unwrap_or(path);
+fn export_base_dir(path: &Path) -> PathBuf {
+    path.parent().unwrap_or(path).to_path_buf()
+}
+
+fn default_export_name(path: &Path) -> String {
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("gitsave_export");
     let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    parent
-        .join(format!("{}-{}.zip", name, timestamp))
-        .to_string_lossy()
-        .to_string()
+    format!("{}-{}.zip", name, timestamp)
+}
+
+fn validate_export_name(input: &str) -> std::result::Result<String, String> {
+    let name = input.trim();
+    if name.is_empty() {
+        return Err("File name cannot be empty".to_string());
+    }
+    if name.contains('/') || name.contains('\\') || name.contains(':') {
+        return Err("Use a file name only (no path separators)".to_string());
+    }
+    Ok(name.to_string())
 }
 
 fn export_archive(source: &Path, output: &Path) -> std::result::Result<(), String> {
@@ -685,12 +715,14 @@ fn picker_body_lines(state: &PathPickerState) -> Vec<Line<'static>> {
 
     match state.mode {
         PickerMode::Select => {
-            lines.push(Line::from("Select a path to open:"));
+            lines.push(Line::from("Select a path to manage:"));
             lines.push(Line::from(""));
             for (idx, choice) in state.choices.iter().enumerate() {
                 let prefix = if idx == state.index { ">" } else { " " };
                 lines.push(Line::from(format!("{} {}", prefix, choice.label)));
             }
+            lines.push(Line::from(""));
+            lines.push(Line::from("Tip: Enter = manage actions for the selected path."));
         }
         PickerMode::Input => {
             lines.push(Line::from("Enter a path:"));
@@ -712,7 +744,8 @@ fn picker_body_lines(state: &PathPickerState) -> Vec<Line<'static>> {
             lines.push(Line::from("Manage selected path:"));
             lines.push(Line::from(format!("> {}", target)));
             if let Some(path) = state.manage_target.as_ref() {
-                let repo_status = if has_git_dir(path) {
+                let has_git = has_git_dir(path);
+                let repo_status = if has_git {
                     "Git repo detected"
                 } else {
                     "No Git repo"
@@ -727,6 +760,12 @@ fn picker_body_lines(state: &PathPickerState) -> Vec<Line<'static>> {
                     .unwrap_or_else(|| "Unknown".to_string());
                 lines.push(Line::from(""));
                 lines.push(Line::from(repo_status));
+                if has_git && !has_gitsave_config(path) {
+                    lines.push(Line::from(Span::styled(
+                        "Warning: missing gitsave.toml",
+                        Style::default().fg(Color::LightRed),
+                    )));
+                }
                 lines.push(Line::from(format!("Last used: {}", last_used)));
                 lines.push(Line::from(format!("Repo size: {}", repo_size)));
                 lines.push(Line::from(""));
@@ -738,10 +777,14 @@ fn picker_body_lines(state: &PathPickerState) -> Vec<Line<'static>> {
             }
             if let Some(message) = &state.message {
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    message.clone(),
-                    Style::default().fg(Color::LightGreen),
-                )));
+                let style = if message.to_lowercase().contains("error")
+                    || message.to_lowercase().contains("fail")
+                {
+                    Style::default().fg(Color::LightRed)
+                } else {
+                    Style::default().fg(Color::LightGreen)
+                };
+                lines.push(Line::from(Span::styled(message.clone(), style)));
             }
         }
         PickerMode::ConfirmCleanup => {
@@ -769,9 +812,15 @@ fn picker_body_lines(state: &PathPickerState) -> Vec<Line<'static>> {
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "(none)".to_string());
+            let export_dir = state
+                .export_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(unknown)".to_string());
             lines.push(Line::from("Export archive (working tree only)."));
             lines.push(Line::from(format!("Source: {}", target)));
-            lines.push(Line::from("Enter output zip path:"));
+            lines.push(Line::from(format!("Output dir: {}", export_dir)));
+            lines.push(Line::from("Enter output zip file name:"));
             lines.push(Line::from(format!("> {}", state.export_path)));
             if let Some(message) = &state.message {
                 lines.push(Line::from(""));
@@ -1126,6 +1175,7 @@ struct PathPickerState {
     manage_last_used: Option<i64>,
     confirm_input: String,
     export_path: String,
+    export_dir: Option<PathBuf>,
     dirty: bool,
 }
 
@@ -1141,6 +1191,7 @@ impl PathPickerState {
             manage_last_used: None,
             confirm_input: String::new(),
             export_path: String::new(),
+            export_dir: None,
             dirty: true,
         }
     }
