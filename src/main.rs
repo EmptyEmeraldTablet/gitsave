@@ -24,6 +24,8 @@ fn get_save_dir(cli: &Cli) -> PathBuf {
     }
 }
 
+const DEFAULT_COMPRESSION: i32 = 6;
+
 fn handle_init(save_dir: &Path, force: bool) -> Result<()> {
     if let Ok(existing) = Git2Core::open(save_dir) {
         let config_path = existing.workdir().join("gitsave.toml");
@@ -46,23 +48,27 @@ fn handle_init(save_dir: &Path, force: bool) -> Result<()> {
     }
 
     let mut core = Git2Core::init(save_dir).context("Failed to init repository")?;
-    let config_content = r#"# gitsave configuration
-[save]
-max_history = 50
-compression = 6
+    core
+        .set_core_compression(DEFAULT_COMPRESSION)
+        .context("Failed to set core.compression")?;
+    let config_content = format!(
+        "# gitsave configuration\n[save]\nmax_history = 50\ncompression = {}\n\n[auto_save]\nenabled = false\n\n[author]\nname = \"\"\nemail = \"\"\n",
+        DEFAULT_COMPRESSION
+    );
 
-[auto_save]
-enabled = false
-
-[author]
-name = ""
-email = ""
-"#;
     let config_path = save_dir.join("gitsave.toml");
     std::fs::write(&config_path, config_content).context("Failed to write config")?;
 
+    let attributes_path = save_dir.join(".gitattributes");
+    let attributes_content = "# Treat game saves as binary\nsaves/** -text -diff -merge\n";
+    std::fs::write(&attributes_path, attributes_content)
+        .context("Failed to write .gitattributes")?;
+
     core
-        .commit_files(&[config_path.clone()], "init gitsave config")
+        .commit_files(
+            &[config_path.clone(), attributes_path.clone()],
+            "init gitsave config",
+        )
         .context("Failed to create initial config commit")?;
 
     println!("[OK] Initialized gitsave repository");

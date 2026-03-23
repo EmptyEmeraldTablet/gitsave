@@ -35,6 +35,14 @@ impl Git2Core {
         &self.workdir
     }
 
+    pub fn set_core_compression(&mut self, level: i32) -> Result<()> {
+        let mut config = self.repo.config().map_err(SaveError::Repository)?;
+        config
+            .set_i64("core.compression", level as i64)
+            .map_err(SaveError::Repository)?;
+        Ok(())
+    }
+
     pub fn commit(&mut self, message: &str) -> Result<SaveResult> {
         let mut index = self.repo.index().map_err(SaveError::Repository)?;
         index

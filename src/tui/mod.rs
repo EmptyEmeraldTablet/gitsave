@@ -31,6 +31,7 @@ const BUSY_REDRAW_MS: u64 = 500;
 const TICK_RATE_MS: u64 = 400;
 const MAX_NOTIFICATION_LINES: usize = 4;
 const MAX_INIT_PREVIEW_ITEMS: usize = 20;
+const DEFAULT_COMPRESSION: i32 = 6;
 
 pub fn run(save_dir: &Path) -> Result<()> {
     let mut stdout = stdout();
@@ -965,11 +966,23 @@ fn write_config_and_commit(
     author_name: &str,
     author_email: &str,
 ) -> Result<()> {
+    core
+        .set_core_compression(DEFAULT_COMPRESSION)
+        .map_err(|err| anyhow::anyhow!("Failed to set core.compression: {}", err))?;
     let config_content = build_config_content(author_name, author_email);
     let config_path = base_path.join("gitsave.toml");
     fs::write(&config_path, config_content)
         .map_err(|err| anyhow::anyhow!("Failed to write config: {}", err))?;
-    core.commit_files(&[config_path], "init gitsave config")?;
+
+    let attributes_path = base_path.join(".gitattributes");
+    let attributes_content = "# Treat game saves as binary\nsaves/** -text -diff -merge\n";
+    fs::write(&attributes_path, attributes_content)
+        .map_err(|err| anyhow::anyhow!("Failed to write .gitattributes: {}", err))?;
+
+    core.commit_files(
+        &[config_path, attributes_path],
+        "init gitsave config",
+    )?;
     Ok(())
 }
 
@@ -977,8 +990,8 @@ fn build_config_content(author_name: &str, author_email: &str) -> String {
     let name = escape_toml_string(author_name);
     let email = escape_toml_string(author_email);
     format!(
-        "# gitsave configuration\n[save]\nmax_history = 50\ncompression = 6\n\n[auto_save]\nenabled = false\n\n[author]\nname = \"{}\"\nemail = \"{}\"\n",
-        name, email
+        "# gitsave configuration\n[save]\nmax_history = 50\ncompression = {}\n\n[auto_save]\nenabled = false\n\n[author]\nname = \"{}\"\nemail = \"{}\"\n",
+        DEFAULT_COMPRESSION, name, email
     )
 }
 
