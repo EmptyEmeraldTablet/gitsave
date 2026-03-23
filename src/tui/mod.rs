@@ -130,8 +130,6 @@ fn run_app_loop(
             app.mark_dirty();
         }
     }
-
-    }
 }
 
 fn run_init_flow(
