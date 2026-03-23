@@ -44,7 +44,6 @@ fn handle_init(save_dir: &Path, force: bool) -> Result<()> {
     }
 
     let mut core = Git2Core::init(save_dir).context("Failed to init repository")?;
-    let repo = core.repo();
     let config_content = r#"# gitsave configuration
 [save]
 max_history = 50
@@ -66,7 +65,7 @@ email = ""
 
     println!("[OK] Initialized gitsave repository");
     println!("  Location: {}", save_dir.display());
-    println!("  Git path: {}", repo.path().display());
+    println!("  Git path: {}", core.repo().path().display());
     Ok(())
 }
 
