@@ -381,8 +381,12 @@ fn run_path_picker(
                                         continue;
                                     }
                                 };
-                                let expected = target.display().to_string();
-                                if state.confirm_input.trim() != expected {
+                                let input = state.confirm_input.trim();
+                                if input.is_empty() {
+                                    state.set_error("Path cannot be empty".to_string());
+                                    continue;
+                                }
+                                if !paths_match(input, &target.display().to_string()) {
                                     state.set_error("Path does not match".to_string());
                                     continue;
                                 }
@@ -794,7 +798,7 @@ fn picker_body_lines(state: &PathPickerState) -> Vec<Line<'static>> {
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "(none)".to_string());
             lines.push(Line::from("Confirm cleanup (removes .git only)."));
-            lines.push(Line::from("Type the full path to proceed:"));
+            lines.push(Line::from("Type the full path to proceed (quotes ok):"));
             lines.push(Line::from(format!("> {}", state.confirm_input)));
             lines.push(Line::from(""));
             lines.push(Line::from(format!("Expected: {}", target)));
@@ -902,6 +906,7 @@ fn init_finalize_author(state: &mut InitState, skip: bool) -> Result<Option<Path
     };
 
     let mut core = Git2Core::open(&path)?;
+
     let (name, email) = if skip {
         ("".to_string(), "".to_string())
     } else {
