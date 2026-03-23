@@ -57,8 +57,9 @@ pub fn run(save_dir: &Path) -> Result<()> {
         cache.add_path(&active_dir);
 
         let mut app = AppState::new(active_dir.clone())?;
-        if run_app_loop(&mut terminal, &mut app)? {
-            break;
+        match run_app_loop(&mut terminal, &mut app)? {
+            AppExit::Quit => break,
+            AppExit::SwitchPicker => continue,
         }
     }
 
@@ -74,15 +75,14 @@ pub fn run(save_dir: &Path) -> Result<()> {
 fn run_app_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut AppState,
-) -> Result<bool> {
+) -> Result<AppExit> {
     let tick_rate = Duration::from_millis(TICK_RATE_MS);
-    let mut should_quit = false;
     let mut cursor_busy = false;
     let mut last_busy_redraw = Instant::now();
 
     app.mark_dirty();
 
-    while !should_quit {
+    loop {
         let busy_now = app.busy.is_some();
         if busy_now != cursor_busy {
             let style = if busy_now {
@@ -113,8 +113,8 @@ fn run_app_loop(
         if event::poll(tick_rate)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    if app.handle_key(key.code, &mut should_quit)? {
-                        break;
+                    if let Some(exit) = app.handle_key(key.code)? {
+                        return Ok(exit);
                     }
                 }
                 Event::Resize(_, _) => {
@@ -131,7 +131,7 @@ fn run_app_loop(
         }
     }
 
-    Ok(should_quit)
+    }
 }
 
 fn run_init_flow(
@@ -687,10 +687,6 @@ fn add_dir_to_zip(
     for entry in entries {
         let entry = entry.map_err(|err| err.to_string())?;
         let entry_path = entry.path();
-        if entry_path.file_name().and_then(|s| s.to_str()) == Some(".git") {
-            continue;
-        }
-
         let metadata = entry.metadata().map_err(|err| err.to_string())?;
         if metadata.is_dir() {
             let rel = entry_path
@@ -856,7 +852,7 @@ fn picker_body_lines(state: &PathPickerState) -> Vec<Line<'static>> {
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "(unknown)".to_string());
-            lines.push(Line::from("Export archive (working tree only)."));
+            lines.push(Line::from("Export archive (includes .git)."));
             lines.push(Line::from(format!("Source: {}", target)));
             lines.push(Line::from(format!("Output dir: {}", export_dir)));
             lines.push(Line::from("Enter output zip file name:"));
@@ -1126,6 +1122,11 @@ impl Focus {
             Focus::History => Focus::Routes,
         }
     }
+}
+
+enum AppExit {
+    Quit,
+    SwitchPicker,
 }
 
 enum InitMode {
@@ -1596,15 +1597,14 @@ impl AppState {
         self.focus = self.focus.toggle();
     }
 
-    fn handle_key(&mut self, code: KeyCode, should_quit: &mut bool) -> Result<bool> {
+    fn handle_key(&mut self, code: KeyCode) -> Result<Option<AppExit>> {
         match &mut self.mode {
             UiMode::Normal => {
                 if self.recovery_view {
                     let mut handled = false;
                     match code {
                         KeyCode::Char('q') => {
-                            *should_quit = true;
-                            return Ok(true);
+                            return Ok(Some(AppExit::Quit));
                         }
                         KeyCode::Char('R') | KeyCode::Esc => {
                             self.recovery_view = false;
@@ -1669,13 +1669,15 @@ impl AppState {
                     if handled {
                         self.mark_dirty();
                     }
-                    return Ok(false);
+                    return Ok(None);
                 }
                 let mut handled = false;
                 match code {
                     KeyCode::Char('q') => {
-                        *should_quit = true;
-                        return Ok(true);
+                        return Ok(Some(AppExit::Quit));
+                    }
+                    KeyCode::Char('p') => {
+                        return Ok(Some(AppExit::SwitchPicker));
                     }
                     KeyCode::Char('r') => {
                         self.with_busy("Refreshing...", |s| s.refresh())?;
@@ -1762,7 +1764,7 @@ impl AppState {
                 if handled {
                     self.mark_dirty();
                 }
-                Ok(false)
+                Ok(None)
             }
             UiMode::SavePrompt { buffer, .. } => {
                 let mut handled = false;
@@ -1788,7 +1790,7 @@ impl AppState {
                 if handled {
                     self.mark_dirty();
                 }
-                Ok(false)
+                Ok(None)
             }
             UiMode::RollbackPrompt { buffer, .. } => {
                 let mut handled = false;
@@ -1817,7 +1819,7 @@ impl AppState {
                 if handled {
                     self.mark_dirty();
                 }
-                Ok(false)
+                Ok(None)
             }
             UiMode::AmendPrompt { buffer } => {
                 let mut handled = false;
@@ -1844,7 +1846,7 @@ impl AppState {
                 if handled {
                     self.mark_dirty();
                 }
-                Ok(false)
+                Ok(None)
             }
             UiMode::RecoveryRename { buffer, .. } => {
                 let mut handled = false;
@@ -1872,7 +1874,7 @@ impl AppState {
                 if handled {
                     self.mark_dirty();
                 }
-                Ok(false)
+                Ok(None)
             }
             UiMode::RenameRoute { buffer, .. } => {
                 let mut handled = false;
@@ -1901,7 +1903,7 @@ impl AppState {
                 if handled {
                     self.mark_dirty();
                 }
-                Ok(false)
+                Ok(None)
             }
             UiMode::CreateRoute { buffer, .. } => {
                 let mut handled = false;
@@ -1929,7 +1931,7 @@ impl AppState {
                 if handled {
                     self.mark_dirty();
                 }
-                Ok(false)
+                Ok(None)
             }
             UiMode::ConfirmAction { action, .. } => {
                 let mut handled = false;
@@ -1958,7 +1960,7 @@ impl AppState {
                 if handled {
                     self.mark_dirty();
                 }
-                Ok(false)
+                Ok(None)
             }
             UiMode::ResolveDirty { action, .. } => {
                 let mut handled = false;
@@ -1993,7 +1995,7 @@ impl AppState {
                 if handled {
                     self.mark_dirty();
                 }
-                Ok(false)
+                Ok(None)
             }
             UiMode::ResolveUnstableSave { request, .. } => {
                 let mut handled = false;
@@ -2028,7 +2030,7 @@ impl AppState {
                 if handled {
                     self.mark_dirty();
                 }
-                Ok(false)
+                Ok(None)
             }
         }
     }
@@ -2897,6 +2899,8 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
         Span::raw(": recovery  "),
         Span::styled("d", Style::default().fg(Color::Yellow)),
         Span::raw(": discard  "),
+        Span::styled("p", Style::default().fg(Color::Yellow)),
+        Span::raw(": paths  "),
         Span::styled("Tab", Style::default().fg(Color::Yellow)),
         Span::raw(": focus  "),
         Span::styled("q", Style::default().fg(Color::Yellow)),
