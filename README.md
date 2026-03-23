@@ -53,7 +53,7 @@ TUI 是首选交互方式，适合频繁保存/回滚场景：
 [docs/USE_CASES.md](docs/USE_CASES.md)
 
 ## 文档索引
-
+- wiki地址 [gitsave-wiki](https://gitsave-wiki.pages.dev/)
 - 安装与环境配置：[docs/INSTALL.md](docs/INSTALL.md)
 - 详细命令参考：[docs/COMMANDS.md](docs/COMMANDS.md)
 - TUI 交互说明：[docs/TUI.md](docs/TUI.md)
