@@ -8,6 +8,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::core::{CompareResult, RouteInfo, SaveEntry, SaveResult, SaveStatus};
 use crate::error::{Result, SaveError};
+use crate::cache::AutoSaveStateCache;
 use crate::git::Git2Core;
 
 const STABILITY_WINDOW_MS: u64 = 1200;
@@ -243,7 +244,8 @@ impl SaveManager {
         }
 
         let now = chrono::Local::now().timestamp();
-        if let Some(last_save) = config.last_save_time {
+        if let Some(last_save) = AutoSaveStateCache::new().load_last_save_time(self.core.workdir())
+        {
             if now - last_save >= config.interval as i64 {
                 return true;
             }
@@ -254,9 +256,12 @@ impl SaveManager {
     }
 
     pub fn update_last_save_time(&self) {
-        let mut config = ConfigManager::new(self.core.workdir()).load_auto_save_config();
-        config.last_save_time = Some(chrono::Local::now().timestamp());
-        let _ = ConfigManager::new(self.core.workdir()).save_auto_save_config(&config);
+        let config = ConfigManager::new(self.core.workdir()).load_auto_save_config();
+        if !config.enabled {
+            return;
+        }
+        AutoSaveStateCache::new()
+            .set_last_save_time(self.core.workdir(), chrono::Local::now().timestamp());
     }
 }
 
@@ -316,7 +321,6 @@ pub struct AutoSaveConfig {
     pub enabled: bool,
     pub interval: u64,
     pub max_count: u32,
-    pub last_save_time: Option<i64>,
 }
 
 impl Default for AutoSaveConfig {
@@ -325,7 +329,6 @@ impl Default for AutoSaveConfig {
             enabled: false,
             interval: 300,
             max_count: 10,
-            last_save_time: None,
         }
     }
 }
@@ -396,7 +399,6 @@ impl ConfigManager {
             enabled,
             interval,
             max_count,
-            last_save_time: None,
         }
     }
 

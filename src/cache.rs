@@ -84,3 +84,65 @@ impl RecentPathCache {
         let _ = fs::write(&self.path, content);
     }
 }
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+struct AutoSaveStateEntry {
+    path: String,
+    last_save_time: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct AutoSaveStateFile {
+    entries: Vec<AutoSaveStateEntry>,
+}
+
+pub struct AutoSaveStateCache {
+    path: PathBuf,
+}
+
+impl AutoSaveStateCache {
+    pub fn new() -> Self {
+        let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
+        let path = base.join("gitsave").join("autosave_state.toml");
+        Self { path }
+    }
+
+    pub fn load_last_save_time(&self, repo_path: &Path) -> Option<i64> {
+        let content = fs::read_to_string(&self.path).ok()?;
+        let file: AutoSaveStateFile = toml::from_str(&content).ok()?;
+        file.entries
+            .into_iter()
+            .find(|entry| PathBuf::from(&entry.path) == repo_path)
+            .map(|entry| entry.last_save_time)
+    }
+
+    pub fn set_last_save_time(&self, repo_path: &Path, timestamp: i64) {
+        let mut entries = self.load_entries();
+        entries.retain(|entry| PathBuf::from(&entry.path) != repo_path);
+        entries.insert(
+            0,
+            AutoSaveStateEntry {
+                path: repo_path.to_string_lossy().to_string(),
+                last_save_time: timestamp,
+            },
+        );
+        let file = AutoSaveStateFile { entries };
+        let content = match toml::to_string_pretty(&file) {
+            Ok(content) => content,
+            Err(_) => return,
+        };
+        if let Some(parent) = self.path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&self.path, content);
+    }
+
+    fn load_entries(&self) -> Vec<AutoSaveStateEntry> {
+        match fs::read_to_string(&self.path) {
+            Ok(content) => toml::from_str::<AutoSaveStateFile>(&content)
+                .unwrap_or_default()
+                .entries,
+            Err(_) => Vec::new(),
+        }
+    }
+}

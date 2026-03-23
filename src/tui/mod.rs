@@ -20,7 +20,7 @@ use ratatui::terminal::Terminal;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::cache::RecentPathCache;
+use crate::cache::{AutoSaveStateCache, RecentPathCache};
 use crate::core::{RouteInfo, SaveEntry, SaveResult, SaveStatus};
 use crate::error::SaveError;
 use crate::git::Git2Core;
@@ -1256,6 +1256,7 @@ struct AppState {
     route_history_ready: bool,
     status: SaveStatus,
     autosave: AutoSaveConfig,
+    autosave_last_save_time: Option<i64>,
     focus: Focus,
     last_refresh: Instant,
     notifications: Vec<UiLogEntry>,
@@ -1286,6 +1287,7 @@ impl AppState {
                 has_uncommitted_changes: false,
             },
             autosave: AutoSaveConfig::default(),
+            autosave_last_save_time: None,
             focus: Focus::Routes,
             last_refresh: Instant::now(),
             notifications: Vec::new(),
@@ -1331,6 +1333,8 @@ impl AppState {
         self.apply_history_filter();
 
         self.autosave = ConfigManager::new(&self.save_dir).load_auto_save_config();
+        self.autosave_last_save_time =
+            AutoSaveStateCache::new().load_last_save_time(&self.save_dir);
         self.last_refresh = Instant::now();
         self.mark_dirty();
         Ok(())
@@ -2916,7 +2920,7 @@ fn draw_routes_panel(f: &mut Frame, area: Rect, app: &AppState) {
                 )),
                 Line::from(format!("Interval: {}s", app.autosave.interval)),
                 Line::from(format!("Max saves: {}", app.autosave.max_count)),
-                Line::from(match app.autosave.last_save_time {
+                Line::from(match app.autosave_last_save_time {
                     Some(ts) => format!(
                         "Last save: {}",
                         chrono::DateTime::from_timestamp(ts, 0)

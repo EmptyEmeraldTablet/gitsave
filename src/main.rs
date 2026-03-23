@@ -10,6 +10,7 @@ mod tui;
 use anyhow::{Context, Result};
 use cli::{Cli, Commands, RouteCommands, parse_args};
 use error::SaveError;
+use cache::AutoSaveStateCache;
 use git::Git2Core;
 use manager::{ConfigManager, RouteManager, SaveManager, is_recovery_branch_name};
 use std::io::{self, Write};
@@ -86,7 +87,8 @@ fn handle_autosave(
         println!("  Enabled: {}", if config.enabled { "yes" } else { "no" });
         println!("  Interval: {} seconds", config.interval);
         println!("  Max count: {}", config.max_count);
-        if let Some(last) = config.last_save_time {
+        let last = AutoSaveStateCache::new().load_last_save_time(save_dir);
+        if let Some(last) = last {
             let last_time = chrono::DateTime::from_timestamp(last, 0)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                 .unwrap_or_else(|| "unknown".to_string());
