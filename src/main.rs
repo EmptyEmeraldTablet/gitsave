@@ -24,7 +24,7 @@ fn get_save_dir(cli: &Cli) -> PathBuf {
 
 fn handle_init(save_dir: &Path, force: bool) -> Result<()> {
     if let Ok(existing) = Git2Core::open(save_dir) {
-        let config_path = existing.repo().path().join("gitsave.toml");
+        let config_path = existing.workdir().join("gitsave.toml");
         if config_path.exists() {
             if !force {
                 eprintln!(
@@ -43,7 +43,7 @@ fn handle_init(save_dir: &Path, force: bool) -> Result<()> {
         }
     }
 
-    let core = Git2Core::init(save_dir).context("Failed to init repository")?;
+    let mut core = Git2Core::init(save_dir).context("Failed to init repository")?;
     let repo = core.repo();
     let config_content = r#"# gitsave configuration
 [save]
@@ -52,9 +52,17 @@ compression = 6
 
 [auto_save]
 enabled = false
+
+[author]
+name = ""
+email = ""
 "#;
-    let config_path = repo.path().join("gitsave.toml");
+    let config_path = save_dir.join("gitsave.toml");
     std::fs::write(&config_path, config_content).context("Failed to write config")?;
+
+    core
+        .commit_files(&[config_path.clone()], "init gitsave config")
+        .context("Failed to create initial config commit")?;
 
     println!("[OK] Initialized gitsave repository");
     println!("  Location: {}", save_dir.display());
@@ -992,7 +1000,7 @@ fn main() {
                 let key = parts[0];
                 let value = parts[1];
 
-                let config_path = save_dir.join(".git").join("gitsave.toml");
+                let config_path = save_dir.join("gitsave.toml");
                 let config = if config_path.exists() {
                     std::fs::read_to_string(&config_path)
                         .map_err(|e| SaveError::Config(e.to_string()))
@@ -1045,7 +1053,7 @@ fn main() {
                     }
                 }
             } else {
-                let config_path = save_dir.join(".git").join("gitsave.toml");
+                let config_path = save_dir.join("gitsave.toml");
                 if !config_path.exists() {
                     println!("No config file found. Using defaults.");
                     println!("  save.max_history = 50");
