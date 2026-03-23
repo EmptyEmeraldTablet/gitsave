@@ -1,4 +1,5 @@
 mod cli;
+mod cache;
 mod core;
 mod error;
 mod git;

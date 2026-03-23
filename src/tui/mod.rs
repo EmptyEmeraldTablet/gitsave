@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -19,6 +20,7 @@ use ratatui::terminal::Terminal;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
+use crate::cache::RecentPathCache;
 use crate::core::{RouteInfo, SaveEntry, SaveResult, SaveStatus};
 use crate::error::SaveError;
 use crate::git::Git2Core;
@@ -28,24 +30,51 @@ const AUTO_REFRESH_SECS: u64 = 10;
 const BUSY_REDRAW_MS: u64 = 500;
 const TICK_RATE_MS: u64 = 400;
 const MAX_NOTIFICATION_LINES: usize = 4;
+const MAX_INIT_PREVIEW_ITEMS: usize = 20;
 
 pub fn run(save_dir: &Path) -> Result<()> {
-    // Preflight check before switching to alternate screen
-    Git2Core::open(save_dir).map_err(|err| {
-        anyhow::anyhow!(
-            "Not a gitsave repository at {}. Run `gitsave init` first. ({})",
-            save_dir.display(),
-            err
-        )
-    })?;
-
     let mut stdout = stdout();
     enable_raw_mode()?;
     stdout.execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = AppState::new(save_dir.to_path_buf())?;
+    let mut active_dir = save_dir.to_path_buf();
+    let cache = RecentPathCache::new();
+    loop {
+        match run_path_picker(&mut terminal, &active_dir, &cache)? {
+            Some(path) => active_dir = path,
+            None => break,
+        }
+
+        if Git2Core::open(&active_dir).is_err() {
+            match run_init_flow(&mut terminal, &active_dir)? {
+                Some(path) => active_dir = path,
+                None => break,
+            }
+        }
+
+        cache.add_path(&active_dir);
+
+        let mut app = AppState::new(active_dir.clone())?;
+        if run_app_loop(&mut terminal, &mut app)? {
+            break;
+        }
+    }
+
+    disable_raw_mode()?;
+    terminal
+        .backend_mut()
+        .execute(SetCursorStyle::DefaultUserShape)?;
+    terminal.backend_mut().execute(LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+fn run_app_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut AppState,
+) -> Result<bool> {
     let tick_rate = Duration::from_millis(TICK_RATE_MS);
     let mut should_quit = false;
     let mut cursor_busy = false;
@@ -74,7 +103,7 @@ pub fn run(save_dir: &Path) -> Result<()> {
             should_draw = true;
         }
         if should_draw {
-            terminal.draw(|f| draw_ui(f, &app))?;
+            terminal.draw(|f| draw_ui(f, app))?;
             app.clear_dirty();
             if busy_now {
                 last_busy_redraw = Instant::now();
@@ -102,13 +131,532 @@ pub fn run(save_dir: &Path) -> Result<()> {
         }
     }
 
-    disable_raw_mode()?;
-    terminal
-        .backend_mut()
-        .execute(SetCursorStyle::DefaultUserShape)?;
-    terminal.backend_mut().execute(LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
+    Ok(should_quit)
+}
+
+fn run_init_flow(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    initial_path: &PathBuf,
+) -> Result<Option<PathBuf>> {
+    let mut state = InitState::new(initial_path);
+    let tick_rate = Duration::from_millis(TICK_RATE_MS);
+
+    loop {
+        if state.dirty {
+            terminal.draw(|f| draw_init_ui(f, &state))?;
+            state.clear_dirty();
+        }
+
+        if event::poll(tick_rate)? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    match state.mode {
+                        InitMode::PathInput => {
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+                                KeyCode::Enter => {
+                                    if let Err(message) = init_scan_path(&mut state) {
+                                        state.set_error(message);
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    state.input_path.pop();
+                                    state.mark_dirty();
+                                }
+                                KeyCode::Char(ch) => {
+                                    state.input_path.push(ch);
+                                    state.mark_dirty();
+                                }
+                                _ => {}
+                            }
+                        }
+                        InitMode::Confirm => {
+                            match key.code {
+                                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                    match init_confirm(&mut state) {
+                                        Ok(Some(path)) => return Ok(Some(path)),
+                                        Ok(None) => {}
+                                        Err(err) => {
+                                            state.mode = InitMode::PathInput;
+                                            state.set_error(err.to_string());
+                                        }
+                                    }
+                                }
+                                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                    state.mode = InitMode::PathInput;
+                                    state.mark_dirty();
+                                }
+                                _ => {}
+                            }
+                        }
+                        InitMode::AuthorInput => {
+                            match key.code {
+                                KeyCode::Tab => {
+                                    state.author_field = match state.author_field {
+                                        AuthorField::Name => AuthorField::Email,
+                                        AuthorField::Email => AuthorField::Name,
+                                    };
+                                    state.mark_dirty();
+                                }
+                                KeyCode::Enter => {
+                                    match init_finalize_author(&mut state, false) {
+                                        Ok(Some(path)) => return Ok(Some(path)),
+                                        Ok(None) => {}
+                                        Err(err) => state.set_error(err.to_string()),
+                                    }
+                                }
+                                KeyCode::Esc => {
+                                    match init_finalize_author(&mut state, true) {
+                                        Ok(Some(path)) => return Ok(Some(path)),
+                                        Ok(None) => {}
+                                        Err(err) => state.set_error(err.to_string()),
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    match state.author_field {
+                                        AuthorField::Name => {
+                                            state.author_name.pop();
+                                        }
+                                        AuthorField::Email => {
+                                            state.author_email.pop();
+                                        }
+                                    }
+                                    state.mark_dirty();
+                                }
+                                KeyCode::Char(ch) => {
+                                    match state.author_field {
+                                        AuthorField::Name => state.author_name.push(ch),
+                                        AuthorField::Email => state.author_email.push(ch),
+                                    }
+                                    state.mark_dirty();
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                Event::Resize(_, _) => state.mark_dirty(),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn run_path_picker(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    initial_path: &PathBuf,
+    cache: &RecentPathCache,
+) -> Result<Option<PathBuf>> {
+    let choices = build_path_choices(initial_path, cache);
+    let mut state = PathPickerState::new(choices, initial_path);
+    let tick_rate = Duration::from_millis(TICK_RATE_MS);
+
+    loop {
+        if state.dirty {
+            terminal.draw(|f| draw_path_picker_ui(f, &state))?;
+            state.clear_dirty();
+        }
+
+        if event::poll(tick_rate)? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    match state.mode {
+                        PickerMode::Select => match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if !state.choices.is_empty()
+                                    && state.index + 1 < state.choices.len()
+                                {
+                                    state.index += 1;
+                                    state.mark_dirty();
+                                }
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if state.index > 0 {
+                                    state.index -= 1;
+                                    state.mark_dirty();
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if let Some(choice) = state.choices.get(state.index) {
+                                    if let Some(path) = &choice.path {
+                                        return Ok(Some(path.clone()));
+                                    }
+                                }
+                                state.mode = PickerMode::Input;
+                                state.mark_dirty();
+                            }
+                            KeyCode::Char('n') => {
+                                state.mode = PickerMode::Input;
+                                state.mark_dirty();
+                            }
+                            _ => {}
+                        },
+                        PickerMode::Input => match key.code {
+                            KeyCode::Esc => {
+                                state.mode = PickerMode::Select;
+                                state.clear_error();
+                                state.mark_dirty();
+                            }
+                            KeyCode::Backspace => {
+                                state.input_path.pop();
+                                state.mark_dirty();
+                            }
+                            KeyCode::Enter => {
+                                match validate_path(&state.input_path) {
+                                    Ok(path) => return Ok(Some(path)),
+                                    Err(err) => state.set_error(err),
+                                }
+                            }
+                            KeyCode::Char(ch) => {
+                                state.input_path.push(ch);
+                                state.mark_dirty();
+                            }
+                            _ => {}
+                        },
+                    }
+                }
+                Event::Resize(_, _) => state.mark_dirty(),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn build_path_choices(initial_path: &PathBuf, cache: &RecentPathCache) -> Vec<PathChoice> {
+    let mut choices = Vec::new();
+    choices.push(PathChoice {
+        label: format!("Current: {}", initial_path.display()),
+        path: Some(initial_path.clone()),
+    });
+
+    for path in cache.load_paths() {
+        if path == *initial_path {
+            continue;
+        }
+        choices.push(PathChoice {
+            label: format!("Recent: {}", path.display()),
+            path: Some(path),
+        });
+    }
+
+    choices.push(PathChoice {
+        label: "New path...".to_string(),
+        path: None,
+    });
+
+    choices
+}
+
+fn validate_path(input: &str) -> std::result::Result<PathBuf, String> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return Err("Path cannot be empty".to_string());
+    }
+    let path = PathBuf::from(raw);
+    if !path.exists() {
+        return Err("Path does not exist".to_string());
+    }
+    if !path.is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
+    Ok(path)
+}
+
+fn draw_path_picker_ui(f: &mut Frame, state: &PathPickerState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Length(3),
+                Constraint::Min(10),
+                Constraint::Length(3),
+            ]
+            .as_ref(),
+        )
+        .split(f.size());
+
+    let header = Paragraph::new("gitsave TUI · Select Path")
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    f.render_widget(header, chunks[0]);
+
+    let body = Paragraph::new(picker_body_lines(state))
+        .block(Block::default().borders(Borders::ALL).title("Paths"))
+        .wrap(Wrap { trim: true });
+    f.render_widget(body, chunks[1]);
+
+    let footer_text = match state.mode {
+        PickerMode::Select => "Enter = select  n = new path  Esc = quit",
+        PickerMode::Input => "Enter = confirm  Esc = back",
+    };
+    let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::Yellow));
+    f.render_widget(footer, chunks[2]);
+}
+
+fn picker_body_lines(state: &PathPickerState) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    match state.mode {
+        PickerMode::Select => {
+            lines.push(Line::from("Select a path to open:"));
+            lines.push(Line::from(""));
+            for (idx, choice) in state.choices.iter().enumerate() {
+                let prefix = if idx == state.index { ">" } else { " " };
+                lines.push(Line::from(format!("{} {}", prefix, choice.label)));
+            }
+        }
+        PickerMode::Input => {
+            lines.push(Line::from("Enter a path:"));
+            lines.push(Line::from(format!("> {}", state.input_path)));
+            if let Some(error) = &state.error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("Error: {}", error),
+                    Style::default().fg(Color::LightRed),
+                )));
+            }
+        }
+    }
+
+    lines
+}
+
+fn init_scan_path(state: &mut InitState) -> std::result::Result<(), String> {
+    state.clear_error();
+    let raw = state.input_path.trim();
+    if raw.is_empty() {
+        return Err("Path cannot be empty".to_string());
+    }
+    let path = PathBuf::from(raw);
+    if !path.exists() {
+        return Err("Path does not exist".to_string());
+    }
+    if !path.is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
+
+    let (entries, summary) = load_dir_preview(&path)?;
+    state.entries = entries;
+    state.entry_summary = summary;
+    state.mode = InitMode::Confirm;
+    state.mark_dirty();
     Ok(())
+}
+
+fn init_confirm(state: &mut InitState) -> Result<Option<PathBuf>> {
+    state.clear_error();
+    let raw = state.input_path.trim();
+    let path = PathBuf::from(raw);
+    if !path.exists() || !path.is_dir() {
+        state.mode = InitMode::PathInput;
+        state.mark_dirty();
+        return Err(anyhow::anyhow!("Invalid path"));
+    }
+
+    if let Ok(existing) = Git2Core::open(&path) {
+        let config_path = existing.workdir().join("gitsave.toml");
+        state.mode = InitMode::PathInput;
+        state.mark_dirty();
+        if config_path.exists() {
+            return Err(anyhow::anyhow!("gitsave already initialized here"));
+        }
+        return Err(anyhow::anyhow!(
+            "Git repository already exists; choose another folder"
+        ));
+    }
+
+    let mut core = Git2Core::init(&path)?;
+    let needs_author = core.repo().signature().is_err();
+    if needs_author {
+        state.init_path = Some(path);
+        state.mode = InitMode::AuthorInput;
+        state.author_field = AuthorField::Name;
+        state.mark_dirty();
+        return Ok(None);
+    }
+
+    write_config_and_commit(&mut core, &path, "", "")?;
+    Ok(Some(path))
+}
+
+fn init_finalize_author(state: &mut InitState, skip: bool) -> Result<Option<PathBuf>> {
+    state.clear_error();
+    let Some(path) = state.init_path.clone() else {
+        state.mode = InitMode::PathInput;
+        state.mark_dirty();
+        return Ok(None);
+    };
+
+    let mut core = Git2Core::open(&path)?;
+    let (name, email) = if skip {
+        ("".to_string(), "".to_string())
+    } else {
+        (state.author_name.trim().to_string(), state.author_email.trim().to_string())
+    };
+
+    write_config_and_commit(&mut core, &path, &name, &email)?;
+    Ok(Some(path))
+}
+
+fn write_config_and_commit(
+    core: &mut Git2Core,
+    base_path: &Path,
+    author_name: &str,
+    author_email: &str,
+) -> Result<()> {
+    let config_content = build_config_content(author_name, author_email);
+    let config_path = base_path.join("gitsave.toml");
+    fs::write(&config_path, config_content)
+        .map_err(|err| anyhow::anyhow!("Failed to write config: {}", err))?;
+    core.commit_files(&[config_path], "init gitsave config")?;
+    Ok(())
+}
+
+fn build_config_content(author_name: &str, author_email: &str) -> String {
+    let name = escape_toml_string(author_name);
+    let email = escape_toml_string(author_email);
+    format!(
+        "# gitsave configuration\n[save]\nmax_history = 50\ncompression = 6\n\n[auto_save]\nenabled = false\n\n[author]\nname = \"{}\"\nemail = \"{}\"\n",
+        name, email
+    )
+}
+
+fn escape_toml_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn load_dir_preview(path: &Path) -> std::result::Result<(Vec<DirEntryInfo>, String), String> {
+    let mut entries = Vec::new();
+    let mut dir_count = 0usize;
+    let mut file_count = 0usize;
+
+    let read_dir = fs::read_dir(path).map_err(|err| err.to_string())?;
+    for entry in read_dir {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let file_type = entry.file_type().map_err(|err| err.to_string())?;
+        let name = entry
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+        let is_dir = file_type.is_dir();
+        if is_dir {
+            dir_count += 1;
+        } else {
+            file_count += 1;
+        }
+        entries.push(DirEntryInfo { name, is_dir });
+    }
+
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+
+    let summary = format!(
+        "Dirs: {}  Files: {}  Total: {}",
+        dir_count,
+        file_count,
+        dir_count + file_count
+    );
+
+    Ok((entries, summary))
+}
+
+fn draw_init_ui(f: &mut Frame, state: &InitState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Length(3),
+                Constraint::Min(10),
+                Constraint::Length(3),
+            ]
+            .as_ref(),
+        )
+        .split(f.size());
+
+    let header = Paragraph::new("gitsave TUI · Init")
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    f.render_widget(header, chunks[0]);
+
+    let body_lines = init_body_lines(state);
+    let body = Paragraph::new(body_lines)
+        .block(Block::default().borders(Borders::ALL).title("Initialize"))
+        .wrap(Wrap { trim: true });
+    f.render_widget(body, chunks[1]);
+
+    let footer_text = match state.mode {
+        InitMode::PathInput => "Enter = scan  Esc = quit",
+        InitMode::Confirm => "Y = init  N/Esc = edit path",
+        InitMode::AuthorInput => "Tab = switch  Enter = confirm  Esc = skip",
+    };
+    let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::Yellow));
+    f.render_widget(footer, chunks[2]);
+}
+
+fn init_body_lines(state: &InitState) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    match state.mode {
+        InitMode::PathInput => {
+            lines.push(Line::from("Enter a directory to initialize gitsave."));
+            lines.push(Line::from(format!("> {}", state.input_path)));
+            if let Some(error) = &state.path_error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("Error: {}", error),
+                    Style::default().fg(Color::LightRed),
+                )));
+            }
+        }
+        InitMode::Confirm => {
+            lines.push(Line::from("Confirm initialization at:"));
+            lines.push(Line::from(format!("> {}", state.input_path.trim())));
+            if !state.entry_summary.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(state.entry_summary.clone()));
+            }
+            if !state.entries.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from("Preview:"));
+                for entry in state.entries.iter().take(MAX_INIT_PREVIEW_ITEMS) {
+                    let prefix = if entry.is_dir { "[D]" } else { "[F]" };
+                    lines.push(Line::from(format!("{} {}", prefix, entry.name)));
+                }
+                if state.entries.len() > MAX_INIT_PREVIEW_ITEMS {
+                    lines.push(Line::from(format!(
+                        "... and {} more",
+                        state.entries.len() - MAX_INIT_PREVIEW_ITEMS
+                    )));
+                }
+            }
+        }
+        InitMode::AuthorInput => {
+            lines.push(Line::from(
+                "Git user not configured. Enter author info (optional).",
+            ));
+            lines.push(Line::from(""));
+            let name_prefix = match state.author_field {
+                AuthorField::Name => ">",
+                AuthorField::Email => " ",
+            };
+            let email_prefix = match state.author_field {
+                AuthorField::Name => " ",
+                AuthorField::Email => ">",
+            };
+            lines.push(Line::from(format!(
+                "{} Name : {}",
+                name_prefix, state.author_name
+            )));
+            lines.push(Line::from(format!(
+                "{} Email: {}",
+                email_prefix, state.author_email
+            )));
+        }
+    }
+
+    lines
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -123,6 +671,118 @@ impl Focus {
             Focus::Routes => Focus::History,
             Focus::History => Focus::Routes,
         }
+    }
+}
+
+enum InitMode {
+    PathInput,
+    Confirm,
+    AuthorInput,
+}
+
+enum AuthorField {
+    Name,
+    Email,
+}
+
+struct DirEntryInfo {
+    name: String,
+    is_dir: bool,
+}
+
+struct InitState {
+    input_path: String,
+    path_error: Option<String>,
+    entries: Vec<DirEntryInfo>,
+    entry_summary: String,
+    mode: InitMode,
+    author_name: String,
+    author_email: String,
+    author_field: AuthorField,
+    init_path: Option<PathBuf>,
+    dirty: bool,
+}
+
+impl InitState {
+    fn new(initial_path: &Path) -> Self {
+        Self {
+            input_path: initial_path.display().to_string(),
+            path_error: None,
+            entries: Vec::new(),
+            entry_summary: String::new(),
+            mode: InitMode::PathInput,
+            author_name: String::new(),
+            author_email: String::new(),
+            author_field: AuthorField::Name,
+            init_path: None,
+            dirty: true,
+        }
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn clear_dirty(&mut self) {
+        self.dirty = false;
+    }
+
+    fn set_error(&mut self, message: impl Into<String>) {
+        self.path_error = Some(message.into());
+        self.mark_dirty();
+    }
+
+    fn clear_error(&mut self) {
+        self.path_error = None;
+    }
+}
+
+enum PickerMode {
+    Select,
+    Input,
+}
+
+struct PathChoice {
+    label: String,
+    path: Option<PathBuf>,
+}
+
+struct PathPickerState {
+    choices: Vec<PathChoice>,
+    index: usize,
+    mode: PickerMode,
+    input_path: String,
+    error: Option<String>,
+    dirty: bool,
+}
+
+impl PathPickerState {
+    fn new(choices: Vec<PathChoice>, initial_path: &Path) -> Self {
+        Self {
+            choices,
+            index: 0,
+            mode: PickerMode::Select,
+            input_path: initial_path.display().to_string(),
+            error: None,
+            dirty: true,
+        }
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn clear_dirty(&mut self) {
+        self.dirty = false;
+    }
+
+    fn set_error(&mut self, message: impl Into<String>) {
+        self.error = Some(message.into());
+        self.mark_dirty();
+    }
+
+    fn clear_error(&mut self) {
+        self.error = None;
     }
 }
 
