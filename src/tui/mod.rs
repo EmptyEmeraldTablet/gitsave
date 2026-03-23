@@ -690,14 +690,14 @@ fn add_dir_to_zip(
             let rel = entry_path
                 .strip_prefix(base)
                 .map_err(|err| err.to_string())?;
-            let name = format!("{}/", rel.to_string_lossy());
+            let name = format!("{}/", zip_path(rel));
             let _ = zip.add_directory(name, options);
             add_dir_to_zip(zip, base, &entry_path, options)?;
         } else if metadata.is_file() {
             let rel = entry_path
                 .strip_prefix(base)
                 .map_err(|err| err.to_string())?;
-            let name = rel.to_string_lossy();
+            let name = zip_path(rel);
             zip.start_file(name, options)
                 .map_err(|err| err.to_string())?;
             let mut file = fs::File::open(&entry_path).map_err(|err| err.to_string())?;
@@ -708,6 +708,19 @@ fn add_dir_to_zip(
         }
     }
     Ok(())
+}
+
+fn zip_path(path: &Path) -> String {
+    let mut out = String::new();
+    for component in path.components() {
+        if let std::path::Component::Normal(part) = component {
+            if !out.is_empty() {
+                out.push('/');
+            }
+            out.push_str(&part.to_string_lossy());
+        }
+    }
+    out
 }
 
 fn draw_path_picker_ui(f: &mut Frame, state: &PathPickerState) {
