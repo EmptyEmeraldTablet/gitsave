@@ -4,9 +4,10 @@ use crate::core::{
 };
 use crate::error::{Result, SaveError};
 use chrono::{DateTime, Utc};
-use git2::{BranchType, Commit, DiffOptions, Oid, Patch, Repository, ResetType};
+use git2::{BranchType, Commit, DiffOptions, Oid, Patch, Repository, ResetType, Signature};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use toml::Value;
 
 pub struct Git2Core {
     repo: Repository,
@@ -47,7 +48,7 @@ impl Git2Core {
             .find_tree(tree_id)
             .map_err(SaveError::Repository)?;
 
-        let sig = self.repo.signature().map_err(SaveError::Repository)?;
+        let sig = self.resolve_signature()?;
         let head = self.repo.head().ok();
         let parent_commit = head.and_then(|h| h.peel_to_commit().ok());
 
@@ -72,6 +73,44 @@ impl Git2Core {
         })
     }
 
+    pub fn commit_files(&mut self, paths: &[PathBuf], message: &str) -> Result<SaveResult> {
+        let mut index = self.repo.index().map_err(SaveError::Repository)?;
+        for path in paths {
+            if let Ok(rel) = path.strip_prefix(&self.workdir) {
+                index.add_path(rel).map_err(SaveError::Repository)?;
+            }
+        }
+        let tree_id = index.write_tree().map_err(SaveError::Repository)?;
+        index.write().map_err(SaveError::Repository)?;
+
+        let tree = self
+            .repo
+            .find_tree(tree_id)
+            .map_err(SaveError::Repository)?;
+
+        let sig = self.resolve_signature()?;
+        let head = self.repo.head().ok();
+        let parent_commit = head.and_then(|h| h.peel_to_commit().ok());
+
+        let mut parents: Vec<&Commit> = Vec::new();
+        if let Some(ref commit) = parent_commit {
+            parents.push(commit);
+        }
+
+        let commit_oid = self
+            .repo
+            .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
+            .map_err(SaveError::Repository)?;
+
+        Ok(SaveResult {
+            oid: commit_oid.to_string(),
+            short_oid: commit_oid.to_string()[..7].to_string(),
+            message: message.to_string(),
+            changed_files: 0,
+            timestamp: Utc::now(),
+        })
+    }
+
     pub fn create_recovery_snapshot(&mut self, message: &str) -> Result<Oid> {
         let mut index = self.repo.index().map_err(SaveError::Repository)?;
         index
@@ -85,7 +124,7 @@ impl Git2Core {
             .find_tree(tree_id)
             .map_err(SaveError::Repository)?;
 
-        let sig = self.repo.signature().map_err(SaveError::Repository)?;
+        let sig = self.resolve_signature()?;
         let head = self.repo.head().ok();
         let parent_commit = head.and_then(|h| h.peel_to_commit().ok());
 
@@ -119,7 +158,7 @@ impl Git2Core {
             if let Ok(head_commit) = head.peel_to_commit() {
                 let timestamp = chrono::Local::now().timestamp();
                 let temp_tag = format!("_autosave_{}", timestamp);
-                let sig = self.repo.signature().map_err(SaveError::Repository)?;
+                let sig = self.resolve_signature()?;
                 let _ = self.repo.tag(
                     &temp_tag,
                     &head_commit.into_object(),
@@ -149,7 +188,7 @@ impl Git2Core {
         let head = self.repo.head().map_err(SaveError::Repository)?;
         let commit = head.peel_to_commit().map_err(SaveError::Repository)?;
         let tree = commit.tree().map_err(SaveError::Repository)?;
-        let sig = self.repo.signature().map_err(SaveError::Repository)?;
+        let sig = self.resolve_signature()?;
 
         let commit_oid = commit
             .amend(
@@ -449,7 +488,7 @@ impl Git2Core {
     pub fn create_tag(&self, name: &str, message: &str) -> Result<()> {
         let head = self.repo.head().map_err(SaveError::Repository)?;
         let commit = head.peel_to_commit().map_err(SaveError::Repository)?;
-        let sig = self.repo.signature().map_err(SaveError::Repository)?;
+        let sig = self.resolve_signature()?;
 
         self.repo
             .tag(name, &commit.into_object(), &sig, message, false)
@@ -831,6 +870,50 @@ impl Git2Core {
 
         let diff = diff.map_err(SaveError::Repository)?;
         Ok(diff.deltas().len())
+    }
+
+    fn resolve_signature(&self) -> Result<Signature> {
+        if let Ok(sig) = self.repo.signature() {
+            return Ok(sig);
+        }
+
+        if let Some(sig) = self.signature_from_config()? {
+            return Ok(sig);
+        }
+
+        Signature::now("gitsave", "gitsave@local").map_err(SaveError::Repository)
+    }
+
+    fn signature_from_config(&self) -> Result<Option<Signature>> {
+        let config_path = self.workdir.join("gitsave.toml");
+        let content = match std::fs::read_to_string(&config_path) {
+            Ok(content) => content,
+            Err(_) => return Ok(None),
+        };
+
+        let parsed: Value = match toml::from_str(&content) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+
+        let author = parsed.get("author").and_then(|v| v.as_table());
+        let name = author
+            .and_then(|t| t.get("name"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
+        let email = author
+            .and_then(|t| t.get("email"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
+
+        match (name, email) {
+            (Some(name), Some(email)) if !name.is_empty() && !email.is_empty() => {
+                Signature::now(&name, &email)
+                    .map(Some)
+                    .map_err(SaveError::Repository)
+            }
+            _ => Ok(None),
+        }
     }
 }
 
