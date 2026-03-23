@@ -552,6 +552,41 @@ fn cleanup_repo(path: &Path) -> std::result::Result<(), String> {
     fs::remove_dir_all(&git_dir).map_err(|err| err.to_string())
 }
 
+fn paths_match(input: &str, expected: &str) -> bool {
+    let input_norm = normalize_path_string(input);
+    let expected_norm = normalize_path_string(expected);
+
+    if let (Some(input_path), Some(expected_path)) = (input_norm, expected_norm) {
+        return paths_equal(&input_path, &expected_path);
+    }
+
+    false
+}
+
+fn normalize_path_string(value: &str) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    let path = PathBuf::from(unquoted);
+    path.canonicalize().ok().or(Some(path))
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
 fn repo_size_bytes(path: &Path) -> Option<u64> {
     let git_dir = path.join(".git");
     if !git_dir.exists() || !git_dir.is_dir() {
