@@ -180,6 +180,10 @@ gitsave export <PATH>
 gitsave import <PATH>
 ```
 
+说明：
+- CLI 导出/导入仍为占位。
+- TUI 管理界面已支持导出 zip（工作区文件，不包含 `.git`）。
+
 ## config
 
 查看或设置配置。
@@ -198,6 +202,7 @@ gitsave autosave [OPTIONS]
 
 说明：
 - 当前仅保留配置入口与状态展示，不会自动触发保存任务。
+- 自动保存的“上次执行时间”记录在 OS 级缓存中，不写入仓库文件。
 
 - `--enable`：启用
 - `--disable`：禁用
