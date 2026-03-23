@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::stdout;
+use std::io::{Read, Write, stdout};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -280,7 +280,13 @@ fn run_path_picker(
                             KeyCode::Enter => {
                                 if let Some(choice) = state.choices.get(state.index) {
                                     if let Some(path) = &choice.path {
-                                        return Ok(Some(path.clone()));
+                                        state.mode = PickerMode::Manage;
+                                        state.manage_target = Some(path.clone());
+                                        state.manage_last_used = choice.last_used;
+                                        state.confirm_input.clear();
+                                        state.clear_error();
+                                        state.mark_dirty();
+                                        continue;
                                     }
                                 }
                                 state.mode = PickerMode::Input;
@@ -304,12 +310,130 @@ fn run_path_picker(
                             }
                             KeyCode::Enter => {
                                 match validate_path(&state.input_path) {
-                                    Ok(path) => return Ok(Some(path)),
+                                    Ok(path) => {
+                                        state.mode = PickerMode::Manage;
+                                        state.manage_target = Some(path);
+                                        state.manage_last_used = None;
+                                        state.confirm_input.clear();
+                                        state.clear_error();
+                                        state.mark_dirty();
+                                    }
                                     Err(err) => state.set_error(err),
                                 }
                             }
                             KeyCode::Char(ch) => {
                                 state.input_path.push(ch);
+                                state.mark_dirty();
+                            }
+                            _ => {}
+                        },
+                        PickerMode::Manage => match key.code {
+                            KeyCode::Esc | KeyCode::Char('b') => {
+                                state.mode = PickerMode::Select;
+                                state.manage_target = None;
+                                state.manage_last_used = None;
+                                state.clear_error();
+                                state.mark_dirty();
+                            }
+                            KeyCode::Char('o') | KeyCode::Enter => {
+                                if let Some(path) = &state.manage_target {
+                                    return Ok(Some(path.clone()));
+                                }
+                            }
+                            KeyCode::Char('i') => {
+                                if let Some(path) = &state.manage_target {
+                                    return Ok(Some(path.clone()));
+                                }
+                            }
+                            KeyCode::Char('c') => {
+                                state.mode = PickerMode::ConfirmCleanup;
+                                state.confirm_input.clear();
+                                state.clear_error();
+                                state.mark_dirty();
+                            }
+                            KeyCode::Char('e') => {
+                                if let Some(path) = &state.manage_target {
+                                    state.export_path = default_export_path(path);
+                                    state.mode = PickerMode::ExportInput;
+                                    state.clear_error();
+                                    state.mark_dirty();
+                                }
+                            }
+                            _ => {}
+                        },
+                        PickerMode::ConfirmCleanup => match key.code {
+                            KeyCode::Esc => {
+                                state.mode = PickerMode::Manage;
+                                state.clear_error();
+                                state.mark_dirty();
+                            }
+                            KeyCode::Backspace => {
+                                state.confirm_input.pop();
+                                state.mark_dirty();
+                            }
+                            KeyCode::Enter => {
+                                let target = match state.manage_target.clone() {
+                                    Some(path) => path,
+                                    None => {
+                                        state.mode = PickerMode::Select;
+                                        state.set_error("No target selected".to_string());
+                                        continue;
+                                    }
+                                };
+                                let expected = target.display().to_string();
+                                if state.confirm_input.trim() != expected {
+                                    state.set_error("Path does not match".to_string());
+                                    continue;
+                                }
+                                match cleanup_repo(&target) {
+                                    Ok(()) => {
+                                        state.mode = PickerMode::Select;
+                                        state.manage_target = None;
+                                        state.set_error("Cleanup complete".to_string());
+                                    }
+                                    Err(err) => {
+                                        state.set_error(err);
+                                    }
+                                }
+                                state.mark_dirty();
+                            }
+                            KeyCode::Char(ch) => {
+                                state.confirm_input.push(ch);
+                                state.mark_dirty();
+                            }
+                            _ => {}
+                        },
+                        PickerMode::ExportInput => match key.code {
+                            KeyCode::Esc => {
+                                state.mode = PickerMode::Manage;
+                                state.clear_error();
+                                state.mark_dirty();
+                            }
+                            KeyCode::Backspace => {
+                                state.export_path.pop();
+                                state.mark_dirty();
+                            }
+                            KeyCode::Enter => {
+                                let target = match state.manage_target.clone() {
+                                    Some(path) => path,
+                                    None => {
+                                        state.mode = PickerMode::Select;
+                                        state.set_error("No target selected".to_string());
+                                        continue;
+                                    }
+                                };
+                                let output = PathBuf::from(state.export_path.trim());
+                                match export_archive(&target, &output) {
+                                    Ok(()) => {
+                                        state.mode = PickerMode::Manage;
+                                        state.set_error("Export complete".to_string());
+                                    }
+                                    Err(err) => state.set_error(err),
+                                }
+                                state.mark_dirty();
+                            }
+                            KeyCode::Char(ch) => {
+                                state.export_path.push(ch);
                                 state.mark_dirty();
                             }
                             _ => {}
@@ -328,24 +452,47 @@ fn build_path_choices(initial_path: &PathBuf, cache: &RecentPathCache) -> Vec<Pa
     choices.push(PathChoice {
         label: format!("Current: {}", initial_path.display()),
         path: Some(initial_path.clone()),
+        last_used: None,
     });
 
-    for path in cache.load_paths() {
+    for entry in cache.load_entries() {
+        let path = PathBuf::from(&entry.path);
         if path == *initial_path {
             continue;
         }
+        let last_used = format_last_used(entry.last_used);
+        let label = if last_used.is_empty() {
+            format!("Recent: {}", path.display())
+        } else {
+            format!("Recent: {} · {}", path.display(), last_used)
+        };
         choices.push(PathChoice {
-            label: format!("Recent: {}", path.display()),
+            label,
             path: Some(path),
+            last_used: if entry.last_used > 0 {
+                Some(entry.last_used)
+            } else {
+                None
+            },
         });
     }
 
     choices.push(PathChoice {
         label: "New path...".to_string(),
         path: None,
+        last_used: None,
     });
 
     choices
+}
+
+fn format_last_used(timestamp: i64) -> String {
+    if timestamp <= 0 {
+        return String::new();
+    }
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|dt| format!("last used {}", dt.format("%Y-%m-%d %H:%M")))
+        .unwrap_or_default()
 }
 
 fn validate_path(input: &str) -> std::result::Result<PathBuf, String> {
@@ -361,6 +508,143 @@ fn validate_path(input: &str) -> std::result::Result<PathBuf, String> {
         return Err("Path is not a directory".to_string());
     }
     Ok(path)
+}
+
+fn has_git_dir(path: &Path) -> bool {
+    let git_dir = path.join(".git");
+    git_dir.exists() && git_dir.is_dir()
+}
+
+fn cleanup_repo(path: &Path) -> std::result::Result<(), String> {
+    if !path.exists() || !path.is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
+    let git_dir = path.join(".git");
+    if !git_dir.exists() {
+        return Err("No .git directory found".to_string());
+    }
+    if !git_dir.is_dir() {
+        return Err(".git exists but is not a directory".to_string());
+    }
+    fs::remove_dir_all(&git_dir).map_err(|err| err.to_string())
+}
+
+fn repo_size_bytes(path: &Path) -> Option<u64> {
+    let git_dir = path.join(".git");
+    if !git_dir.exists() || !git_dir.is_dir() {
+        return None;
+    }
+    Some(dir_size_bytes(&git_dir))
+}
+
+fn dir_size_bytes(path: &Path) -> u64 {
+    let mut total = 0u64;
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(_) => return 0,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Ok(metadata) = entry.metadata() {
+            if metadata.is_dir() {
+                total = total.saturating_add(dir_size_bytes(&path));
+            } else {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    total
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * KB;
+    const GB: f64 = 1024.0 * MB;
+    let value = bytes as f64;
+    if value >= GB {
+        format!("{:.2} GB", value / GB)
+    } else if value >= MB {
+        format!("{:.2} MB", value / MB)
+    } else if value >= KB {
+        format!("{:.2} KB", value / KB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn default_export_path(path: &Path) -> String {
+    let parent = path.parent().unwrap_or(path);
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("gitsave_export");
+    let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    parent
+        .join(format!("{}-{}.zip", name, timestamp))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn export_archive(source: &Path, output: &Path) -> std::result::Result<(), String> {
+    if !source.exists() || !source.is_dir() {
+        return Err("Source path is not a directory".to_string());
+    }
+    if output.exists() {
+        return Err("Output file already exists".to_string());
+    }
+    if let Some(parent) = output.parent() {
+        if !parent.exists() {
+            return Err("Output directory does not exist".to_string());
+        }
+    }
+
+    let file = fs::File::create(output).map_err(|err| err.to_string())?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::FileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    add_dir_to_zip(&mut zip, source, source, options)?;
+    zip.finish().map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+fn add_dir_to_zip(
+    zip: &mut zip::ZipWriter<fs::File>,
+    base: &Path,
+    path: &Path,
+    options: zip::write::FileOptions,
+) -> std::result::Result<(), String> {
+    let entries = fs::read_dir(path).map_err(|err| err.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|err| err.to_string())?;
+        let entry_path = entry.path();
+        if entry_path.file_name().and_then(|s| s.to_str()) == Some(".git") {
+            continue;
+        }
+
+        let metadata = entry.metadata().map_err(|err| err.to_string())?;
+        if metadata.is_dir() {
+            let rel = entry_path
+                .strip_prefix(base)
+                .map_err(|err| err.to_string())?;
+            let name = format!("{}/", rel.to_string_lossy());
+            let _ = zip.add_directory(name, options);
+            add_dir_to_zip(zip, base, &entry_path, options)?;
+        } else if metadata.is_file() {
+            let rel = entry_path
+                .strip_prefix(base)
+                .map_err(|err| err.to_string())?;
+            let name = rel.to_string_lossy();
+            zip.start_file(name, options)
+                .map_err(|err| err.to_string())?;
+            let mut file = fs::File::open(&entry_path).map_err(|err| err.to_string())?;
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer)
+                .map_err(|err| err.to_string())?;
+            zip.write_all(&buffer).map_err(|err| err.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn draw_path_picker_ui(f: &mut Frame, state: &PathPickerState) {
@@ -386,8 +670,11 @@ fn draw_path_picker_ui(f: &mut Frame, state: &PathPickerState) {
     f.render_widget(body, chunks[1]);
 
     let footer_text = match state.mode {
-        PickerMode::Select => "Enter = select  n = new path  Esc = quit",
+        PickerMode::Select => "Enter = manage  n = new path  Esc = quit",
         PickerMode::Input => "Enter = confirm  Esc = back",
+        PickerMode::Manage => "o = open  i = init  e = export  c = cleanup  b/Esc = back",
+        PickerMode::ConfirmCleanup => "Enter = confirm  Esc = cancel",
+        PickerMode::ExportInput => "Enter = export  Esc = cancel",
     };
     let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::Yellow));
     f.render_widget(footer, chunks[2]);
@@ -408,10 +695,88 @@ fn picker_body_lines(state: &PathPickerState) -> Vec<Line<'static>> {
         PickerMode::Input => {
             lines.push(Line::from("Enter a path:"));
             lines.push(Line::from(format!("> {}", state.input_path)));
-            if let Some(error) = &state.error {
+            if let Some(error) = &state.message {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     format!("Error: {}", error),
+                    Style::default().fg(Color::LightRed),
+                )));
+            }
+        }
+        PickerMode::Manage => {
+            let target = state
+                .manage_target
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(none)".to_string());
+            lines.push(Line::from("Manage selected path:"));
+            lines.push(Line::from(format!("> {}", target)));
+            if let Some(path) = state.manage_target.as_ref() {
+                let repo_status = if has_git_dir(path) {
+                    "Git repo detected"
+                } else {
+                    "No Git repo"
+                };
+                let last_used = state
+                    .manage_last_used
+                    .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let repo_size = repo_size_bytes(path)
+                    .map(format_bytes)
+                    .unwrap_or_else(|| "Unknown".to_string());
+                lines.push(Line::from(""));
+                lines.push(Line::from(repo_status));
+                lines.push(Line::from(format!("Last used: {}", last_used)));
+                lines.push(Line::from(format!("Repo size: {}", repo_size)));
+                lines.push(Line::from(""));
+                lines.push(Line::from("Actions:"));
+                lines.push(Line::from("  o: open path"));
+                lines.push(Line::from("  i: init if missing"));
+                lines.push(Line::from("  e: export archive"));
+                lines.push(Line::from("  c: cleanup (.git only)"));
+            }
+            if let Some(message) = &state.message {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    message.clone(),
+                    Style::default().fg(Color::LightGreen),
+                )));
+            }
+        }
+        PickerMode::ConfirmCleanup => {
+            let target = state
+                .manage_target
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(none)".to_string());
+            lines.push(Line::from("Confirm cleanup (removes .git only)."));
+            lines.push(Line::from("Type the full path to proceed:"));
+            lines.push(Line::from(format!("> {}", state.confirm_input)));
+            lines.push(Line::from(""));
+            lines.push(Line::from(format!("Expected: {}", target)));
+            if let Some(message) = &state.message {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("Error: {}", message),
+                    Style::default().fg(Color::LightRed),
+                )));
+            }
+        }
+        PickerMode::ExportInput => {
+            let target = state
+                .manage_target
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(none)".to_string());
+            lines.push(Line::from("Export archive (working tree only)."));
+            lines.push(Line::from(format!("Source: {}", target)));
+            lines.push(Line::from("Enter output zip path:"));
+            lines.push(Line::from(format!("> {}", state.export_path)));
+            if let Some(message) = &state.message {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!("Error: {}", message),
                     Style::default().fg(Color::LightRed),
                 )));
             }
@@ -740,11 +1105,15 @@ impl InitState {
 enum PickerMode {
     Select,
     Input,
+    Manage,
+    ConfirmCleanup,
+    ExportInput,
 }
 
 struct PathChoice {
     label: String,
     path: Option<PathBuf>,
+    last_used: Option<i64>,
 }
 
 struct PathPickerState {
@@ -752,7 +1121,11 @@ struct PathPickerState {
     index: usize,
     mode: PickerMode,
     input_path: String,
-    error: Option<String>,
+    message: Option<String>,
+    manage_target: Option<PathBuf>,
+    manage_last_used: Option<i64>,
+    confirm_input: String,
+    export_path: String,
     dirty: bool,
 }
 
@@ -763,7 +1136,11 @@ impl PathPickerState {
             index: 0,
             mode: PickerMode::Select,
             input_path: initial_path.display().to_string(),
-            error: None,
+            message: None,
+            manage_target: None,
+            manage_last_used: None,
+            confirm_input: String::new(),
+            export_path: String::new(),
             dirty: true,
         }
     }
@@ -777,12 +1154,12 @@ impl PathPickerState {
     }
 
     fn set_error(&mut self, message: impl Into<String>) {
-        self.error = Some(message.into());
+        self.message = Some(message.into());
         self.mark_dirty();
     }
 
     fn clear_error(&mut self) {
-        self.error = None;
+        self.message = None;
     }
 }
 

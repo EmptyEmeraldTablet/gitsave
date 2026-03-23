@@ -10,6 +10,15 @@
 - Allow selecting current directory, recent paths, or a new path input.
 - Persist recent paths to an OS-level config file.
 
+## Scope (Phase 3)
+- Add a per-path management menu in the picker.
+- Support cleanup that removes the .git directory only.
+- Require typing the full path to confirm cleanup.
+
+## Scope (Phase 4)
+- Add export/archive action in the manage menu.
+- Show path metadata (last used time, repo size) in the manage menu.
+
 ## Non-goals (Phase 1)
 - Recent-path cache.
 - Export or cleanup features.
