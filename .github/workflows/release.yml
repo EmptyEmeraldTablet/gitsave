@@ -198,7 +198,7 @@ jobs:
       - name: Build MSI installer
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          cargo wix --no-build --nocapture --features gui -dVersion=$version
+          cargo wix --no-build --nocapture -dVersion=$version
           # Rename to a stable filename independent of the version number
           Move-Item "target\wix\gitsave-$version-x86_64.msi" "target\wix\gitsave-gui-windows-x86_64.msi"
 

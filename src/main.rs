@@ -21,6 +21,18 @@ use manager::{ConfigManager, RouteManager, SaveManager, is_recovery_branch_name}
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+// On Windows the process is linked as a GUI subsystem (no console), so we call
+// MessageBoxW directly to surface fatal errors to the user.
+#[cfg(windows)]
+extern "system" {
+    fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, caption: *const u16, utype: u32) -> i32;
+}
+
+#[cfg(windows)]
+unsafe fn windows_message_box(caption: *const u16, text: *const u16) {
+    MessageBoxW(std::ptr::null_mut(), text, caption, 0x10 /* MB_ICONERROR */);
+}
+
 fn get_save_dir(cli: &Cli) -> PathBuf {
     if let Some(path) = &cli.save_dir {
         path.clone()
@@ -1104,7 +1116,36 @@ fn main() {
         #[cfg(feature = "gui")]
         Commands::Gui => {
             if let Err(e) = gui::run(&save_dir) {
-                eprintln!("Error: {}", e);
+                // On Windows GUI builds the console is hidden, so eprintln! is
+                // silently discarded.  Write a crash log that the user can find.
+                #[cfg(windows)]
+                {
+                    let msg = format!("Gitsave GUI error: {e}");
+                    let log_path = std::env::temp_dir().join("gitsave_crash.log");
+                    let log_written = std::fs::write(&log_path, &msg).is_ok();
+                    // Also show a message box so the error is immediately visible.
+                    unsafe {
+                        use std::ffi::OsStr;
+                        use std::os::windows::ffi::OsStrExt;
+                        let body_str = if log_written {
+                            format!(
+                                "{msg}\n\nA full log has been written to:\n{}",
+                                log_path.display()
+                            )
+                        } else {
+                            msg
+                        };
+                        let mut title: Vec<u16> = OsStr::new("Gitsave \u{2014} Fatal Error")
+                            .encode_wide().collect();
+                        title.push(0);
+                        let mut body: Vec<u16> = OsStr::new(&body_str)
+                            .encode_wide().collect();
+                        body.push(0);
+                        windows_message_box(title.as_ptr(), body.as_ptr());
+                    }
+                }
+                #[cfg(not(windows))]
+                eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
