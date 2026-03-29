@@ -56,8 +56,8 @@ jobs:
             ./gitsave init
             ./gitsave save "第一章完成"
             
-            # 启动图形界面
-            ./gitsave-gui gui
+            # 启动图形界面 (需要 GUI 版本)
+            ./gitsave gui
             ```
             
             ## 完整文档
