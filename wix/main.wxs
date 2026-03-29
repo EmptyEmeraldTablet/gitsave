@@ -1,7 +1,10 @@
 <?xml version='1.0' encoding='windows-1252'?>
 <!--
   WiX installer for Gitsave GUI (Windows x64)
-  Build with:  cargo wix --no-build --nocapture --features gui
+  Build with:  cargo wix --no-build --nocapture --features gui -dVersion=<version>
+    where <version> is the semver string from Cargo.toml (e.g. 0.1.0).
+  The CI workflow in .github/workflows/release.yml extracts the version
+  automatically and passes it as -dVersion=$version.
   Requires WiX Toolset v3.x and cargo-wix 0.3.x
 -->
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>

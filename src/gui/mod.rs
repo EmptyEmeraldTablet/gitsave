@@ -277,7 +277,7 @@ impl GitsaveApp {
             Message::PickerBrowse => Task::perform(
                 async {
                     AsyncFileDialog::new()
-                        .set_title("选择游戏存档目录")
+                        .set_title("Select Save Directory / 选择存档目录")
                         .pick_folder()
                         .await
                         .map(|h| h.path().to_path_buf())
