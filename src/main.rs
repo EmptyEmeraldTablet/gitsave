@@ -1,3 +1,6 @@
+// Hide the console window on Windows when running the GUI build.
+#![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
+
 mod cli;
 mod cache;
 mod core;

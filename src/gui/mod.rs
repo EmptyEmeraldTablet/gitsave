@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "gui")]
+use rfd::AsyncFileDialog;
+
 use iced::widget::{
     button, column, container, horizontal_rule, horizontal_space, row, scrollable, text,
     text_input, vertical_space,
@@ -136,6 +139,7 @@ enum Modal {
 enum ConfirmAction {
     SwitchRoute { name: String },
     DiscardChanges,
+    DeleteRoute { name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +181,8 @@ enum Message {
     // Picker
     PickerInput(String),
     PickerSubmit,
+    PickerBrowse,
+    PickerBrowseResult(Option<PathBuf>),
     PickerOpenRecent(PathBuf),
     // Init
     InitYes,
@@ -204,6 +210,7 @@ enum Message {
     // Main – misc
     BeginDiscard,
     BeginAmend,
+    BeginDeleteRoute,
     ToggleRecovery,
     // Modal
     ModalInput(String),
@@ -266,6 +273,25 @@ impl GitsaveApp {
             }
 
             Message::PickerOpenRecent(path) => self.open_path(path),
+
+            Message::PickerBrowse => Task::perform(
+                async {
+                    AsyncFileDialog::new()
+                        .set_title("选择游戏存档目录")
+                        .pick_folder()
+                        .await
+                        .map(|h| h.path().to_path_buf())
+                },
+                Message::PickerBrowseResult,
+            ),
+
+            Message::PickerBrowseResult(maybe_path) => {
+                if let (Screen::Picker(p), Some(path)) = (&mut self.screen, maybe_path) {
+                    p.input = path.to_string_lossy().to_string();
+                    p.error = None;
+                }
+                Task::none()
+            }
 
             // ── Init ────────────────────────────────────────────────────────
             Message::InitYes => {
@@ -521,6 +547,27 @@ impl GitsaveApp {
                 Task::none()
             }
 
+            Message::BeginDeleteRoute => {
+                if let Screen::Main(s) = &mut self.screen {
+                    if let Some(r) = s.selected_route() {
+                        if r.is_current {
+                            s.notify_err("Cannot delete the current route");
+                        } else {
+                            let name = r.name.clone();
+                            s.modal = Some(Modal::Confirm {
+                                prompt: format!(
+                                    "Delete route '{name}'?\n\
+                                     All saves on this route will be permanently removed.\n\
+                                     This cannot be undone."
+                                ),
+                                action: ConfirmAction::DeleteRoute { name },
+                            });
+                        }
+                    }
+                }
+                Task::none()
+            }
+
             Message::ToggleRecovery => {
                 if let Screen::Main(s) = &mut self.screen {
                     s.is_recovery = !s.is_recovery;
@@ -657,6 +704,19 @@ impl GitsaveApp {
                         Message::ActionDone,
                     )
                 }
+                ConfirmAction::DeleteRoute { name } => {
+                    let dir = match &mut self.screen {
+                        Screen::Main(s) => {
+                            s.busy = true;
+                            s.dir.clone()
+                        }
+                        _ => return Task::none(),
+                    };
+                    Task::perform(
+                        async move { delete_route(dir, name) },
+                        Message::ActionDone,
+                    )
+                }
             },
             Modal::TextInput { value, action, .. } => {
                 let name = value.trim().to_string();
@@ -790,6 +850,11 @@ fn view_picker(s: &PickerState) -> Element<Message> {
             .size(14)
             .width(Length::Fill),
         horizontal_space().width(8),
+        button(text(" Browse… ").size(14))
+            .on_press(Message::PickerBrowse)
+            .style(style_btn_secondary)
+            .padding([8, 12]),
+        horizontal_space().width(4),
         button(text("  Open  ").size(14))
             .on_press(Message::PickerSubmit)
             .style(style_btn_primary)
@@ -1033,6 +1098,25 @@ fn view_routes_panel(s: &MainState) -> Element<Message> {
         }
     };
 
+    let can_delete = s
+        .routes
+        .get(s.sel_route)
+        .map(|r| !r.is_current && !is_recovery_branch_name(&r.name))
+        .unwrap_or(false)
+        && !s.busy;
+
+    let delete_btn = {
+        let b = button(text("✕ Delete Route").size(12).color(C_ERROR))
+            .style(style_btn_ghost)
+            .padding([5, 10])
+            .width(Length::Fill);
+        if can_delete {
+            b.on_press(Message::BeginDeleteRoute)
+        } else {
+            b
+        }
+    };
+
     let recovery_label =
         if s.is_recovery { "✕ Exit Recovery" } else { "⚕ Recovery Mode" };
     let recovery_color = if s.is_recovery { C_WARN } else { C_DIM };
@@ -1060,6 +1144,8 @@ fn view_routes_panel(s: &MainState) -> Element<Message> {
             switch_btn,
             vertical_space().height(2),
             rename_btn,
+            vertical_space().height(2),
+            delete_btn,
             vertical_space().height(8),
             button(text(recovery_label).size(12).color(recovery_color))
                 .on_press(Message::ToggleRecovery)
@@ -1561,6 +1647,11 @@ fn rename_route(dir: PathBuf, old_name: String, new_name: String) -> Result<(), 
 fn discard_changes(dir: PathBuf) -> Result<(), String> {
     let core = Git2Core::open(&dir).map_err(|e| e.to_string())?;
     SaveManager::new(core).discard_changes().map_err(|e| e.to_string())
+}
+
+fn delete_route(dir: PathBuf, name: String) -> Result<(), String> {
+    let core = Git2Core::open(&dir).map_err(|e| e.to_string())?;
+    RouteManager::new(core).delete_route(&name).map_err(|e| e.to_string())
 }
 
 fn amend_message(dir: PathBuf, message: String) -> Result<(), String> {
