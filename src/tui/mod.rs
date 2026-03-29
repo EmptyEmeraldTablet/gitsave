@@ -548,7 +548,30 @@ fn cleanup_repo(path: &Path) -> std::result::Result<(), String> {
     if !git_dir.is_dir() {
         return Err(".git exists but is not a directory".to_string());
     }
-    fs::remove_dir_all(&git_dir).map_err(|err| err.to_string())
+    fs::remove_dir_all(&git_dir).map_err(|err| err.to_string())?;
+
+    // Remove gitsave.toml only if its first line matches the gitsave configuration
+    // marker, guarding against accidentally deleting a similarly-named user file.
+    let config_path = path.join("gitsave.toml");
+    if config_path.is_file() {
+        let content = fs::read_to_string(&config_path).map_err(|err| err.to_string())?;
+        let first_line = content.lines().next().unwrap_or("");
+        if first_line == "# gitsave configuration" {
+            fs::remove_file(&config_path).map_err(|err| err.to_string())?;
+        }
+    }
+
+    // Remove .gitattributes only when its content exactly matches the template
+    // written by gitsave, so a pre-existing user file is never touched.
+    let attributes_path = path.join(".gitattributes");
+    if attributes_path.is_file() {
+        let content = fs::read_to_string(&attributes_path).map_err(|err| err.to_string())?;
+        if content == "# Treat game saves as binary\nsaves/** -text -diff -merge\n" {
+            fs::remove_file(&attributes_path).map_err(|err| err.to_string())?;
+        }
+    }
+
+    Ok(())
 }
 
 fn paths_match(input: &str, expected: &str) -> bool {
@@ -820,7 +843,7 @@ fn picker_body_lines(state: &PathPickerState) -> Vec<Line<'static>> {
                 lines.push(Line::from("  o: open path"));
                 lines.push(Line::from("  i: init if missing"));
                 lines.push(Line::from("  e: export archive"));
-                lines.push(Line::from("  c: cleanup (.git only)"));
+                lines.push(Line::from("  c: cleanup (.git, gitsave.toml, .gitattributes)"));
             }
             if let Some(message) = &state.message {
                 lines.push(Line::from(""));
@@ -840,7 +863,7 @@ fn picker_body_lines(state: &PathPickerState) -> Vec<Line<'static>> {
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "(none)".to_string());
-            lines.push(Line::from("Confirm cleanup (removes .git only)."));
+            lines.push(Line::from("Confirm cleanup (removes .git, gitsave.toml, and gitsave .gitattributes)."));
             lines.push(Line::from("Type the full path to proceed (quotes ok):"));
             lines.push(Line::from(format!("> {}", state.confirm_input)));
             lines.push(Line::from(""));
