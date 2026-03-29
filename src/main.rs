@@ -24,13 +24,15 @@ use std::path::{Path, PathBuf};
 // On Windows the process is linked as a GUI subsystem (no console), so we call
 // MessageBoxW directly to surface fatal errors to the user.
 #[cfg(windows)]
-extern "system" {
+unsafe extern "system" {
     fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, caption: *const u16, utype: u32) -> i32;
 }
 
 #[cfg(windows)]
-unsafe fn windows_message_box(caption: *const u16, text: *const u16) {
-    MessageBoxW(std::ptr::null_mut(), text, caption, 0x10 /* MB_ICONERROR */);
+fn windows_message_box(caption: *const u16, text: *const u16) {
+    unsafe {
+        MessageBoxW(std::ptr::null_mut(), text, caption, 0x10 /* MB_ICONERROR */);
+    }
 }
 
 fn get_save_dir(cli: &Cli) -> PathBuf {
