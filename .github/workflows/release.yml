@@ -20,12 +20,10 @@ jobs:
       
       - name: Create Release
         id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: ncipollo/release-action@v1
         with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Gitsave ${{ github.ref_name }}
+          tag: ${{ github.ref_name }}
+          name: Gitsave ${{ github.ref_name }}
           body: |
             ## 下载
             
@@ -65,6 +63,8 @@ jobs:
             详见 [README.md](README.md)
           draft: false
           prerelease: false
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   # 构建 Linux TUI 版本
   build-linux:
