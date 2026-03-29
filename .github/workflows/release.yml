@@ -30,13 +30,20 @@ jobs:
             ## 下载
             
             ### Windows (x86_64)
-            - `gitsave-windows-x86_64.exe`
+            - `gitsave-windows-x86_64.exe` — TUI (命令行界面)
+            - `gitsave-gui-windows-x86_64.exe` — GUI (图形界面)
             
             ### Linux (x86_64)
-            - `gitsave-linux-x86_64`
+            - `gitsave-linux-x86_64` — TUI (命令行界面)
+            - `gitsave-gui-linux-x86_64` — GUI (图形界面)
             
             ### macOS (x86_64)
-            - `gitsave-macos-x86_64`
+            - `gitsave-macos-x86_64` — TUI (命令行界面)
+            - `gitsave-gui-macos-x86_64` — GUI (图形界面)
+            
+            ### macOS (Apple Silicon)
+            - `gitsave-macos-arm64` — TUI (命令行界面)
+            - `gitsave-gui-macos-arm64` — GUI (图形界面)
             
             ## 快速开始
             
@@ -48,6 +55,9 @@ jobs:
             # Linux/macOS
             ./gitsave init
             ./gitsave save "第一章完成"
+            
+            # 启动图形界面
+            ./gitsave-gui gui
             ```
             
             ## 完整文档
@@ -55,7 +65,7 @@ jobs:
           draft: false
           prerelease: false
 
-  # 构建 Linux 版本
+  # 构建 Linux TUI 版本
   build-linux:
     needs: create-release
     runs-on: ubuntu-latest
@@ -81,7 +91,47 @@ jobs:
           asset_name: gitsave-linux-x86_64
           asset_content_type: application/octet-stream
 
-  # 构建 Windows 版本
+  # 构建 Linux GUI 版本
+  build-linux-gui:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install GUI system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-x11-dev \
+            libegl-dev \
+            libvulkan-dev \
+            pkg-config
+      
+      - name: Build Linux GUI binary
+        run: |
+          cargo build --release --features gui
+          cp target/release/gitsave gitsave-gui-linux-x86_64
+          chmod +x gitsave-gui-linux-x86_64
+      
+      - name: Upload Linux GUI binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./gitsave-gui-linux-x86_64
+          asset_name: gitsave-gui-linux-x86_64
+          asset_content_type: application/octet-stream
+
+  # 构建 Windows TUI 版本
   build-windows:
     needs: create-release
     runs-on: ubuntu-latest
@@ -113,7 +163,32 @@ jobs:
           asset_name: gitsave-windows-x86_64.exe
           asset_content_type: application/octet-stream
 
-  # 构建 macOS 版本
+  # 构建 Windows GUI 版本 (native MSVC runner)
+  build-windows-gui:
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build Windows GUI binary
+        run: |
+          cargo build --release --features gui
+          copy target\release\gitsave.exe gitsave-gui-windows-x86_64.exe
+      
+      - name: Upload Windows GUI binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./gitsave-gui-windows-x86_64.exe
+          asset_name: gitsave-gui-windows-x86_64.exe
+          asset_content_type: application/octet-stream
+
+  # 构建 macOS TUI 版本 (x86_64)
   build-macos:
     needs: create-release
     runs-on: macos-latest
@@ -139,7 +214,33 @@ jobs:
           asset_name: gitsave-macos-x86_64
           asset_content_type: application/octet-stream
 
-  # 构建 ARM64 macOS 版本 (Apple Silicon)
+  # 构建 macOS GUI 版本 (x86_64)
+  build-macos-gui:
+    needs: create-release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Build macOS GUI binary
+        run: |
+          cargo build --release --features gui
+          cp target/release/gitsave gitsave-gui-macos-x86_64
+          chmod +x gitsave-gui-macos-x86_64
+      
+      - name: Upload macOS GUI binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./gitsave-gui-macos-x86_64
+          asset_name: gitsave-gui-macos-x86_64
+          asset_content_type: application/octet-stream
+
+  # 构建 ARM64 macOS TUI 版本 (Apple Silicon)
   build-macos-arm64:
     needs: create-release
     runs-on: macos-latest
@@ -165,4 +266,32 @@ jobs:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ./gitsave-macos-arm64
           asset_name: gitsave-macos-arm64
+          asset_content_type: application/octet-stream
+
+  # 构建 ARM64 macOS GUI 版本 (Apple Silicon)
+  build-macos-arm64-gui:
+    needs: create-release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      
+      - name: Build macOS ARM64 GUI binary
+        run: |
+          cargo build --release --features gui --target aarch64-apple-darwin
+          cp target/aarch64-apple-darwin/release/gitsave gitsave-gui-macos-arm64
+          chmod +x gitsave-gui-macos-arm64
+      
+      - name: Upload macOS ARM64 GUI binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./gitsave-gui-macos-arm64
+          asset_name: gitsave-gui-macos-arm64
           asset_content_type: application/octet-stream

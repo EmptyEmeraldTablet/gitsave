@@ -6,6 +6,8 @@ mod git;
 mod manager;
 mod state;
 mod tui;
+#[cfg(feature = "gui")]
+mod gui;
 
 use anyhow::{Context, Result};
 use cli::{Cli, Commands, RouteCommands, parse_args};
@@ -1092,6 +1094,13 @@ fn main() {
         }
         Commands::Tui => {
             if let Err(e) = tui::run(&save_dir) {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        #[cfg(feature = "gui")]
+        Commands::Gui => {
+            if let Err(e) = gui::run(&save_dir) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
