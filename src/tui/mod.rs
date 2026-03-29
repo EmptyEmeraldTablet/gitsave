@@ -756,7 +756,7 @@ fn draw_path_picker_ui(f: &mut Frame, state: &PathPickerState) {
                 Constraint::Min(10),
                 Constraint::Length(3),
             ]
-            .as_ref(),
+            .as_slice(),
         )
         .split(f.size());
 
@@ -1069,7 +1069,7 @@ fn draw_init_ui(f: &mut Frame, state: &InitState) {
                 Constraint::Min(10),
                 Constraint::Length(3),
             ]
-            .as_ref(),
+            .as_slice(),
         )
         .split(f.size());
 
@@ -2874,7 +2874,7 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
                 Constraint::Percentage(25),
                 Constraint::Length(3),
             ]
-            .as_ref(),
+            .as_slice(),
         )
         .split(f.size());
 
@@ -2917,7 +2917,7 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
 
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_ref())
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)].as_slice())
         .split(chunks[1]);
 
     draw_routes_panel(f, body_chunks[0], app);
@@ -2972,7 +2972,7 @@ fn draw_ui(f: &mut Frame, app: &AppState) {
 fn draw_routes_panel(f: &mut Frame, area: Rect, app: &AppState) {
     let panel_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(5)].as_ref())
+        .constraints([Constraint::Min(5), Constraint::Length(5)].as_slice())
         .split(area);
 
     let recovery_mode = app.in_recovery_mode();
@@ -3085,7 +3085,7 @@ fn draw_routes_panel(f: &mut Frame, area: Rect, app: &AppState) {
 fn draw_history_panel(f: &mut Frame, area: Rect, app: &AppState) {
     let panel_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Length(7)].as_ref())
+        .constraints([Constraint::Min(10), Constraint::Length(7)].as_slice())
         .split(area);
 
     let history_block = Block::default()
@@ -3393,7 +3393,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
                 Constraint::Percentage(percent_x),
                 Constraint::Percentage((100 - percent_x) / 2),
             ]
-            .as_ref(),
+            .as_slice(),
         )
         .split(area);
 
@@ -3405,7 +3405,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
                 Constraint::Percentage(percent_y),
                 Constraint::Percentage((100 - percent_y) / 2),
             ]
-            .as_ref(),
+            .as_slice(),
         )
         .split(horizontal[1])[1]
 }

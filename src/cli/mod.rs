@@ -132,6 +132,10 @@ pub enum Commands {
     #[command(about = "Launch the interactive TUI dashboard (experimental)")]
     Tui,
 
+    #[cfg(feature = "gui")]
+    #[command(about = "Launch the interactive GUI dashboard")]
+    Gui,
+
     #[command(about = "Recovery mode (saved discards)")]
     Recovery {
         #[arg(short, long, action = clap::ArgAction::SetTrue)]
