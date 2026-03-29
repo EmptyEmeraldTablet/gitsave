@@ -1546,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "gitsave"
-version = "0.1.0"
+version = "0.1.27"
 dependencies = [
  "anyhow",
  "chrono",
