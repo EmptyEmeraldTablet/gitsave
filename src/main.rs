@@ -1105,6 +1105,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        #[cfg(feature = "gui")]
+        Commands::GuiInstall => {
+            if let Err(e) = gui::run_installer() {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
         Commands::Recovery {
             list,
             name,

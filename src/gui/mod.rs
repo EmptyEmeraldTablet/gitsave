@@ -25,7 +25,7 @@ const C_DIM: Color = Color { r: 0.50, g: 0.50, b: 0.58, a: 1.0 };
 const C_SEL: Color = Color { r: 0.28, g: 0.62, b: 1.00, a: 0.20 };
 const C_RECOVERY: Color = Color { r: 0.92, g: 0.55, b: 0.10, a: 1.0 };
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
+// ─── Entry points ────────────────────────────────────────────────────────────
 
 pub fn run(save_dir: &Path) -> anyhow::Result<()> {
     let path = save_dir.to_path_buf();
@@ -40,6 +40,18 @@ pub fn run(save_dir: &Path) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("GUI error: {e}"))
 }
 
+pub fn run_installer() -> anyhow::Result<()> {
+    iced::application("Gitsave — Setup", GitsaveApp::update, GitsaveApp::view)
+        .window(window::Settings {
+            size: Size::new(620.0, 520.0),
+            min_size: Some(Size::new(500.0, 420.0)),
+            ..Default::default()
+        })
+        .theme(GitsaveApp::theme)
+        .run_with(GitsaveApp::new_installer)
+        .map_err(|e| anyhow::anyhow!("GUI installer error: {e}"))
+}
+
 // ─── State ───────────────────────────────────────────────────────────────────
 
 struct GitsaveApp {
@@ -50,6 +62,7 @@ enum Screen {
     Picker(PickerState),
     Init(InitState),
     Main(MainState),
+    Installer(InstallerState),
 }
 
 // ── Picker ───────────────────────────────────────────────────────────────────
@@ -122,6 +135,30 @@ impl MainState {
     fn notify_err(&mut self, msg: impl Into<String>) {
         self.notif = Some(Notif { text: msg.into(), kind: NotifKind::Err });
     }
+}
+
+// ── Installer ────────────────────────────────────────────────────────────────
+
+struct InstallerState {
+    install_dir: String,
+    step: InstallerStep,
+    error: Option<String>,
+    installed_path: Option<PathBuf>,
+    shortcut_created: bool,
+    shortcut_error: Option<String>,
+}
+
+enum InstallerStep {
+    Welcome,
+    Installing,
+    Done,
+}
+
+#[derive(Debug, Clone)]
+struct InstalledInfo {
+    exe_path: PathBuf,
+    shortcut_created: bool,
+    shortcut_error: Option<String>,
 }
 
 // ── Modal ─────────────────────────────────────────────────────────────────────
@@ -213,6 +250,11 @@ enum Message {
     ActionDone(Result<(), String>),
     // Navigation
     BackToPicker,
+    // Installer
+    InstallDirChanged(String),
+    StartInstall,
+    InstallDone(Result<InstalledInfo, String>),
+    LaunchAfterInstall,
 }
 
 // ─── App ─────────────────────────────────────────────────────────────────────
@@ -245,6 +287,23 @@ impl GitsaveApp {
 
     fn theme(&self) -> Theme {
         Theme::Dark
+    }
+
+    fn new_installer() -> (Self, Task<Message>) {
+        let install_dir = default_install_dir().to_string_lossy().to_string();
+        (
+            Self {
+                screen: Screen::Installer(InstallerState {
+                    install_dir,
+                    step: InstallerStep::Welcome,
+                    error: None,
+                    installed_path: None,
+                    shortcut_created: false,
+                    shortcut_error: None,
+                }),
+            },
+            Task::none(),
+        )
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -575,6 +634,49 @@ impl GitsaveApp {
                 self.to_picker();
                 Task::none()
             }
+
+            // ── Installer ────────────────────────────────────────────────────
+            Message::InstallDirChanged(v) => {
+                if let Screen::Installer(s) = &mut self.screen {
+                    s.install_dir = v;
+                }
+                Task::none()
+            }
+
+            Message::StartInstall => {
+                let dir = match &mut self.screen {
+                    Screen::Installer(s) => {
+                        s.step = InstallerStep::Installing;
+                        s.error = None;
+                        PathBuf::from(s.install_dir.trim())
+                    }
+                    _ => return Task::none(),
+                };
+                Task::perform(async move { do_install(dir) }, Message::InstallDone)
+            }
+
+            Message::InstallDone(Ok(info)) => {
+                if let Screen::Installer(s) = &mut self.screen {
+                    s.step = InstallerStep::Done;
+                    s.shortcut_created = info.shortcut_created;
+                    s.shortcut_error = info.shortcut_error;
+                    s.installed_path = Some(info.exe_path);
+                }
+                Task::none()
+            }
+
+            Message::InstallDone(Err(e)) => {
+                if let Screen::Installer(s) = &mut self.screen {
+                    s.step = InstallerStep::Welcome;
+                    s.error = Some(e);
+                }
+                Task::none()
+            }
+
+            Message::LaunchAfterInstall => {
+                self.to_picker();
+                Task::none()
+            }
         }
     }
 
@@ -775,6 +877,7 @@ impl GitsaveApp {
             Screen::Picker(s) => view_picker(s),
             Screen::Init(s) => view_init(s),
             Screen::Main(s) => view_main(s),
+            Screen::Installer(s) => view_installer(s),
         }
     }
 }
@@ -1337,6 +1440,150 @@ fn view_modal(modal: &Modal) -> Element<Message> {
     center_widget(card)
 }
 
+// ─── Installer views ─────────────────────────────────────────────────────────
+
+fn view_installer(s: &InstallerState) -> Element<'_, Message> {
+    match s.step {
+        InstallerStep::Welcome => view_installer_welcome(s),
+        InstallerStep::Installing => view_installer_installing(),
+        InstallerStep::Done => view_installer_done(s),
+    }
+}
+
+fn view_installer_welcome(s: &InstallerState) -> Element<'_, Message> {
+    let error_elem: Element<Message> = match &s.error {
+        Some(e) => text(e.as_str()).size(13).color(C_ERROR).into(),
+        None => vertical_space().height(0).into(),
+    };
+
+    let card = container(
+        column![
+            text("Gitsave 安装向导").size(22).color(C_TEXT),
+            vertical_space().height(6),
+            text("Install Wizard").size(13).color(C_DIM),
+            vertical_space().height(20),
+            horizontal_rule(1),
+            vertical_space().height(16),
+            text("Gitsave 是一款基于 Git 的游戏存档管理工具，\n\
+                  支持存档分支、回滚与多路线管理。\n\n\
+                  Gitsave is a Git-powered game save manager with\n\
+                  branching routes, rollback, and history.")
+                .size(13)
+                .color(C_DIM),
+            vertical_space().height(24),
+            text("安装目录 / Install directory:").size(13).color(C_TEXT),
+            vertical_space().height(6),
+            text_input("Installation path…", &s.install_dir)
+                .on_input(Message::InstallDirChanged)
+                .on_submit(Message::StartInstall)
+                .padding([8, 10])
+                .size(14)
+                .width(Length::Fill),
+            vertical_space().height(8),
+            error_elem,
+            vertical_space().height(16),
+            row![
+                horizontal_space(),
+                button(text("  Install  ").size(14))
+                    .on_press(Message::StartInstall)
+                    .style(style_btn_primary)
+                    .padding([9, 24]),
+            ]
+            .align_y(Alignment::Center),
+        ]
+        .spacing(0)
+        .padding(36)
+        .width(Length::Fill),
+    )
+    .width(540)
+    .style(style_card);
+
+    center_widget(card.into())
+}
+
+fn view_installer_installing() -> Element<'static, Message> {
+    let card = container(
+        column![
+            text("正在安装… / Installing…").size(20).color(C_TEXT),
+            vertical_space().height(20),
+            text("⟳  Please wait…").size(14).color(C_DIM),
+        ]
+        .spacing(0)
+        .padding(36),
+    )
+    .width(400)
+    .style(style_card);
+
+    center_widget(card.into())
+}
+
+fn view_installer_done(s: &InstallerState) -> Element<'_, Message> {
+    let (title, title_color) = match &s.installed_path {
+        Some(_) => ("✓  安装成功！ / Installation Complete!", C_SUCCESS),
+        None => ("✕  安装失败 / Installation Failed", C_ERROR),
+    };
+
+    let detail: Element<Message> = match &s.installed_path {
+        Some(path) => {
+            let shortcut_line: Element<Message> = if s.shortcut_created {
+                text("桌面快捷方式已创建。\nDesktop shortcut has been created.")
+                    .size(12)
+                    .color(C_SUCCESS)
+                    .into()
+            } else {
+                let note = s.shortcut_error.as_deref().unwrap_or(
+                    "未能创建桌面快捷方式（您仍可从终端运行 `gitsave gui` 启动）。\n\
+                     Desktop shortcut could not be created \
+                     (you can still run `gitsave gui` from a terminal).",
+                );
+                text(note).size(12).color(C_WARN).into()
+            };
+            column![
+                text(format!("已安装至：{}", path.display())).size(13).color(C_ACCENT),
+                vertical_space().height(10),
+                shortcut_line,
+            ]
+            .spacing(0)
+            .into()
+        }
+        None => text("请检查安装目录权限后重试。\nCheck directory permissions and try again.")
+            .size(13)
+            .color(C_DIM)
+            .into(),
+    };
+
+    let action_btn: Element<Message> = if s.installed_path.is_some() {
+        button(text("  启动 Gitsave / Launch Gitsave  ").size(14))
+            .on_press(Message::LaunchAfterInstall)
+            .style(style_btn_primary)
+            .padding([9, 24])
+            .into()
+    } else {
+        button(text("  ← 返回 / Back  ").size(14))
+            .on_press(Message::LaunchAfterInstall)
+            .style(style_btn_secondary)
+            .padding([9, 24])
+            .into()
+    };
+
+    let card = container(
+        column![
+            text(title).size(20).color(title_color),
+            vertical_space().height(16),
+            detail,
+            vertical_space().height(24),
+            row![horizontal_space(), action_btn].align_y(Alignment::Center),
+        ]
+        .spacing(0)
+        .padding(36)
+        .width(Length::Fill),
+    )
+    .width(520)
+    .style(style_card);
+
+    center_widget(card.into())
+}
+
 // ─── Layout helper ───────────────────────────────────────────────────────────
 
 fn center_widget(widget: Element<Message>) -> Element<Message> {
@@ -1592,4 +1839,170 @@ fn init_repo(dir: PathBuf) -> Result<(), String> {
     core.commit_files(&[config_path, attr_path], "init gitsave config")
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+// ─── Installer backend ────────────────────────────────────────────────────────
+
+fn default_install_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        // Prefer %LOCALAPPDATA% which is always user-writable.
+        dirs::data_local_dir()
+            .or_else(|| std::env::var("LOCALAPPDATA").ok().map(PathBuf::from))
+            .or_else(|| std::env::var("USERPROFILE").ok().map(|p| PathBuf::from(p).join("AppData").join("Local")))
+            .unwrap_or_else(|| PathBuf::from("C:\\gitsave"))
+            .join("Programs")
+            .join("gitsave")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Use ~/.local/bin which is the standard user-local binary location.
+        dirs::home_dir()
+            .map(|h| h.join(".local").join("bin"))
+            .unwrap_or_else(|| PathBuf::from("/usr/local/bin"))
+    }
+}
+
+fn do_install(target_dir: PathBuf) -> Result<InstalledInfo, String> {
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("Cannot locate current binary: {e}"))?;
+
+    let exe_name = if cfg!(target_os = "windows") { "gitsave.exe" } else { "gitsave" };
+
+    std::fs::create_dir_all(&target_dir)
+        .map_err(|e| format!("Cannot create directory '{}': {e}", target_dir.display()))?;
+
+    let target_path = target_dir.join(exe_name);
+
+    // Skip the copy only when both paths resolve to the same canonical file.
+    let already_at_target = target_path.exists()
+        && current_exe.canonicalize().ok() == target_path.canonicalize().ok();
+
+    if !already_at_target {
+        std::fs::copy(&current_exe, &target_path)
+            .map_err(|e| format!("Failed to copy binary: {e}"))?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&target_path)
+            .map_err(|e| format!("Cannot read permissions: {e}"))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&target_path, perms)
+            .map_err(|e| format!("Cannot set permissions: {e}"))?;
+    }
+
+    let (shortcut_created, shortcut_error) = match create_desktop_shortcut(&target_path) {
+        Ok(true) => (true, None),
+        Ok(false) => (false, None),
+        Err(e) => (false, Some(e)),
+    };
+
+    Ok(InstalledInfo { exe_path: target_path, shortcut_created, shortcut_error })
+}
+
+/// Creates a platform-appropriate desktop shortcut for the GUI launcher.
+/// Returns `true` if the shortcut was successfully written.
+fn create_desktop_shortcut(exe_path: &std::path::Path) -> Result<bool, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let apps_dir = dirs::data_dir()
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .map(|h| h.join(".local").join("share"))
+                    .unwrap_or_else(|| PathBuf::from("/usr/local/share"))
+            })
+            .join("applications");
+
+        std::fs::create_dir_all(&apps_dir)
+            .map_err(|e| format!("Cannot create applications dir: {e}"))?;
+
+        // Quote the Exec path per freedesktop.org spec (double-quotes around path).
+        let desktop_content = format!(
+            "[Desktop Entry]\n\
+             Version=1.0\n\
+             Type=Application\n\
+             Name=Gitsave\n\
+             Comment=Game Save Manager\n\
+             Exec=\"{}\" gui\n\
+             Terminal=false\n\
+             Categories=Utility;Game;\n",
+            exe_path.display()
+        );
+
+        let desktop_path = apps_dir.join("gitsave.desktop");
+        std::fs::write(&desktop_path, desktop_content)
+            .map_err(|e| format!("Cannot write .desktop file: {e}"))?;
+
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&desktop_path)
+            .map_err(|e| format!("Cannot read desktop file permissions: {e}"))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&desktop_path, perms)
+            .map_err(|e| format!("Cannot set desktop file permissions: {e}"))?;
+
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let apps_dir = dirs::home_dir()
+            .ok_or_else(|| "Cannot determine home directory".to_string())?
+            .join("Applications");
+
+        std::fs::create_dir_all(&apps_dir)
+            .map_err(|e| format!("Cannot create ~/Applications dir: {e}"))?;
+
+        // Quote the exe path to handle spaces.
+        let launcher_content = format!(
+            "#!/bin/bash\n\
+             \"{}\" gui &\n",
+            exe_path.display()
+        );
+        let launcher_path = apps_dir.join("Gitsave.command");
+        std::fs::write(&launcher_path, &launcher_content)
+            .map_err(|e| format!("Cannot write launcher: {e}"))?;
+
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&launcher_path)
+            .map_err(|e| format!("Cannot read launcher permissions: {e}"))?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&launcher_path, perms)
+            .map_err(|e| format!("Cannot set launcher permissions: {e}"))?;
+
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let start_menu = std::env::var("APPDATA")
+            .map(PathBuf::from)
+            .or_else(|_| std::env::var("USERPROFILE").map(|p| PathBuf::from(p).join("AppData").join("Roaming")))
+            .unwrap_or_else(|_| PathBuf::from("C:\\Users\\Default\\AppData\\Roaming"))
+            .join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs");
+
+        std::fs::create_dir_all(&start_menu)
+            .map_err(|e| format!("Cannot create Start Menu dir: {e}"))?;
+
+        // Use PowerShell to launch so that the path is handled correctly.
+        let ps_content = format!(
+            "Start-Process -FilePath '{}' -ArgumentList 'gui'\r\n",
+            exe_path.to_string_lossy().replace('\'', "''")
+        );
+        let ps_path = start_menu.join("Gitsave.ps1");
+        std::fs::write(&ps_path, ps_content)
+            .map_err(|e| format!("Cannot write Start Menu entry: {e}"))?;
+
+        return Ok(true);
+    }
+
+    #[allow(unreachable_code)]
+    Ok(false)
 }

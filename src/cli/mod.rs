@@ -136,6 +136,10 @@ pub enum Commands {
     #[command(about = "Launch the interactive GUI dashboard")]
     Gui,
 
+    #[cfg(feature = "gui")]
+    #[command(about = "Launch the GUI installation wizard")]
+    GuiInstall,
+
     #[command(about = "Recovery mode (saved discards)")]
     Recovery {
         #[arg(short, long, action = clap::ArgAction::SetTrue)]
