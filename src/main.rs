@@ -20,6 +20,8 @@ use git::Git2Core;
 use manager::{ConfigManager, RouteManager, SaveManager, is_recovery_branch_name};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+#[cfg(not(feature = "gui"))]
+use clap::CommandFactory;
 
 // On Windows the process is linked as a GUI subsystem (no console), so we call
 // MessageBoxW directly to surface fatal errors to the user.
@@ -866,7 +868,50 @@ fn main() {
     let cli = parse_args();
     let save_dir = get_save_dir(&cli);
 
-    match &cli.command {
+    if cli.command.is_none() {
+        #[cfg(feature = "gui")]
+        {
+            if let Err(e) = gui::run(&save_dir) {
+                #[cfg(windows)]
+                {
+                    let msg = format!("Gitsave GUI error: {e}");
+                    let log_path = std::env::temp_dir().join("gitsave_crash.log");
+                    let log_written = std::fs::write(&log_path, &msg).is_ok();
+                    unsafe {
+                        use std::ffi::OsStr;
+                        use std::os::windows::ffi::OsStrExt;
+                        let body_str = if log_written {
+                            format!(
+                                "{msg}\n\nA full log has been written to:\n{}",
+                                log_path.display()
+                            )
+                        } else {
+                            msg
+                        };
+                        let mut title: Vec<u16> = OsStr::new("Gitsave \u{2014} Fatal Error")
+                            .encode_wide().collect();
+                        title.push(0);
+                        let mut body: Vec<u16> = OsStr::new(&body_str)
+                            .encode_wide().collect();
+                        body.push(0);
+                        windows_message_box(title.as_ptr(), body.as_ptr());
+                    }
+                }
+                #[cfg(not(windows))]
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            let _ = Cli::command().print_help();
+            println!();
+            std::process::exit(2);
+        }
+    }
+
+    match cli.command.as_ref().expect("command present") {
         Commands::Init { path, force } => {
             if let Err(e) = handle_init(&path, *force) {
                 eprintln!("Error: {}", e);

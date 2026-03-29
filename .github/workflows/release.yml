@@ -200,7 +200,9 @@ jobs:
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
           cargo wix --no-build --nocapture -dVersion=$version
           # Rename to a stable filename independent of the version number
-          Move-Item "target\wix\gitsave-$version-x86_64.msi" "target\wix\gitsave-gui-windows-x86_64.msi"
+          $msi = Get-ChildItem -Path target\wix -Filter "gitsave-*.msi" | Select-Object -First 1
+          if (-not $msi) { throw "MSI not found in target\wix" }
+          Move-Item $msi.FullName "target\wix\gitsave-gui-windows-x86_64.msi"
 
       - name: Upload Windows MSI installer
         uses: actions/upload-release-asset@v1

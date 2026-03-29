@@ -8,7 +8,7 @@ use std::path::PathBuf;
 #[command(about = "Game save management tool powered by Git", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 
     #[arg(short, long, value_name = "PATH")]
     pub save_dir: Option<PathBuf>,
