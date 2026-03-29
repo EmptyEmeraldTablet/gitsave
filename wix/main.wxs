@@ -1,0 +1,172 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  WiX installer for Gitsave GUI (Windows x64)
+  Build with:  cargo wix --no-build --nocapture --features gui -dVersion=<version>
+    where <version> is the semver string from Cargo.toml (e.g. 0.1.0).
+  The CI workflow in .github/workflows/release.yml extracts the version
+  automatically and passes it as -dVersion=$version.
+  Requires WiX Toolset v3.x and cargo-wix 0.3.x
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+    <Product
+        Id='*'
+        Name='Gitsave'
+        UpgradeCode='B4E9F3A2-1C5D-4E8F-9B2A-3D6F7E8C1D4A'
+        Manufacturer='EmptyEmeraldTablet'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package
+            Id='*'
+            Keywords='Installer'
+            Description='Gitsave $(var.Version) — Game Save Manager'
+            Manufacturer='EmptyEmeraldTablet'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            SummaryCodepage='1252'
+            Platform='x64'/>
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
+        <Property Id='DiskPrompt' Value='Gitsave Installation'/>
+
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <!-- Install to 64-bit Program Files -->
+            <Directory Id='ProgramFiles64Folder' Name='PFiles'>
+                <Directory Id='APPLICATIONFOLDER' Name='Gitsave'>
+
+                    <!-- Main executable -->
+                    <Component Id='binary0' Guid='*' Win64='yes'>
+                        <File
+                            Id='exe0'
+                            Name='gitsave-gui.exe'
+                            DiskId='1'
+                            Source='$(var.SourceDir)target\release\gitsave.exe'
+                            KeyPath='yes'/>
+                    </Component>
+
+                    <!-- Add install dir to PATH (optional, can be deselected) -->
+                    <Component Id='Path' Guid='F3A9B2C1-4D7E-5F8A-9B3C-D1E2F4567890' Win64='yes'>
+                        <Environment
+                            Id='PATH'
+                            Name='PATH'
+                            Value='[APPLICATIONFOLDER]'
+                            Permanent='no'
+                            Part='last'
+                            Action='set'
+                            System='yes'/>
+                        <RegistryValue
+                            Root='HKLM'
+                            Key='Software\EmptyEmeraldTablet\Gitsave'
+                            Name='Path'
+                            Type='string'
+                            Value='[APPLICATIONFOLDER]'
+                            KeyPath='yes'/>
+                    </Component>
+
+                </Directory>
+            </Directory>
+
+            <!-- Start Menu shortcut -->
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='ApplicationProgramsFolder' Name='Gitsave'>
+                    <Component Id='ApplicationShortcut' Guid='*'>
+                        <Shortcut
+                            Id='ApplicationStartMenuShortcut'
+                            Name='Gitsave'
+                            Description='Gitsave — Game Save Manager'
+                            Target='[APPLICATIONFOLDER]gitsave-gui.exe'
+                            WorkingDirectory='APPLICATIONFOLDER'/>
+                        <RemoveFolder Id='CleanUpShortCut' Directory='ApplicationProgramsFolder' On='uninstall'/>
+                        <RegistryValue
+                            Root='HKCU'
+                            Key='Software\EmptyEmeraldTablet\Gitsave'
+                            Name='installed'
+                            Type='integer'
+                            Value='1'
+                            KeyPath='yes'/>
+                    </Component>
+                </Directory>
+            </Directory>
+
+            <!-- Desktop shortcut (optional feature) -->
+            <Directory Id='DesktopFolder' Name='Desktop'>
+                <Component Id='DesktopShortcut' Guid='*'>
+                    <Shortcut
+                        Id='DesktopShortcutId'
+                        Name='Gitsave'
+                        Description='Gitsave — Game Save Manager'
+                        Target='[APPLICATIONFOLDER]gitsave-gui.exe'
+                        WorkingDirectory='APPLICATIONFOLDER'/>
+                    <RegistryValue
+                        Root='HKCU'
+                        Key='Software\EmptyEmeraldTablet\Gitsave'
+                        Name='desktop_shortcut'
+                        Type='integer'
+                        Value='1'
+                        KeyPath='yes'/>
+                </Component>
+            </Directory>
+        </Directory>
+
+        <!-- ── Feature tree ─────────────────────────────────────── -->
+
+        <Feature
+            Id='Binaries'
+            Title='Application'
+            Description='Installs Gitsave GUI.'
+            Level='1'
+            ConfigurableDirectory='APPLICATIONFOLDER'
+            AllowAdvertise='no'
+            Display='expand'
+            Absent='disallow'>
+            <ComponentRef Id='binary0'/>
+            <ComponentRef Id='ApplicationShortcut'/>
+
+            <Feature
+                Id='Environment'
+                Title='Add to PATH'
+                Description='Add the install directory to the system PATH environment variable.'
+                Level='1'
+                Absent='allow'>
+                <ComponentRef Id='Path'/>
+            </Feature>
+
+            <Feature
+                Id='DesktopShortcutFeature'
+                Title='Desktop Shortcut'
+                Description='Create a shortcut on the Desktop.'
+                Level='1'
+                Absent='allow'>
+                <ComponentRef Id='DesktopShortcut'/>
+            </Feature>
+        </Feature>
+
+        <!-- ── UI ───────────────────────────────────────────────── -->
+
+        <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
+        <Property Id='ARPHELPLINK' Value='https://github.com/EmptyEmeraldTablet/gitsave'/>
+        <Property Id='ARPURLINFOABOUT' Value='https://github.com/EmptyEmeraldTablet/gitsave'/>
+
+        <UI>
+            <UIRef Id='WixUI_FeatureTree'/>
+            <!-- Skip the license dialog since we use WixUI_FeatureTree without a license RTF -->
+            <Publish Dialog='WelcomeDlg'
+                Control='Next'
+                Event='NewDialog'
+                Value='CustomizeDlg'
+                Order='99'>1</Publish>
+            <Publish Dialog='CustomizeDlg'
+                Control='Back'
+                Event='NewDialog'
+                Value='WelcomeDlg'
+                Order='99'>1</Publish>
+        </UI>
+
+    </Product>
+</Wix>
