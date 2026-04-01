@@ -139,7 +139,6 @@ enum Modal {
 enum ConfirmAction {
     SwitchRoute { name: String },
     DiscardChanges,
-    DeleteRoute { name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -210,7 +209,6 @@ enum Message {
     // Main – misc
     BeginDiscard,
     BeginAmend,
-    BeginDeleteRoute,
     ToggleRecovery,
     // Modal
     ModalInput(String),
@@ -547,27 +545,6 @@ impl GitsaveApp {
                 Task::none()
             }
 
-            Message::BeginDeleteRoute => {
-                if let Screen::Main(s) = &mut self.screen {
-                    if let Some(r) = s.selected_route() {
-                        if r.is_current {
-                            s.notify_err("Cannot delete the current route");
-                        } else {
-                            let name = r.name.clone();
-                            s.modal = Some(Modal::Confirm {
-                                prompt: format!(
-                                    "Delete route '{name}'?\n\
-                                     All saves on this route will be permanently removed.\n\
-                                     This cannot be undone."
-                                ),
-                                action: ConfirmAction::DeleteRoute { name },
-                            });
-                        }
-                    }
-                }
-                Task::none()
-            }
-
             Message::ToggleRecovery => {
                 if let Screen::Main(s) = &mut self.screen {
                     s.is_recovery = !s.is_recovery;
@@ -701,19 +678,6 @@ impl GitsaveApp {
                     };
                     Task::perform(
                         async move { discard_changes(dir) },
-                        Message::ActionDone,
-                    )
-                }
-                ConfirmAction::DeleteRoute { name } => {
-                    let dir = match &mut self.screen {
-                        Screen::Main(s) => {
-                            s.busy = true;
-                            s.dir.clone()
-                        }
-                        _ => return Task::none(),
-                    };
-                    Task::perform(
-                        async move { delete_route(dir, name) },
                         Message::ActionDone,
                     )
                 }
@@ -978,13 +942,13 @@ fn view_header(s: &MainState) -> Element<Message> {
         .unwrap_or("—");
 
     let recovery_badge: Element<Message> = if s.is_recovery {
-        text("  ⚕ RECOVERY MODE  ").size(12).color(C_RECOVERY).into()
+        text("  [RECOVERY MODE]  ").size(12).color(C_RECOVERY).into()
     } else {
         horizontal_space().width(0).into()
     };
 
     let busy_badge: Element<Message> = if s.busy {
-        text("  ⟳  ").size(12).color(C_DIM).into()
+        text("  ...  ").size(12).color(C_DIM).into()
     } else {
         horizontal_space().width(0).into()
     };
@@ -996,12 +960,12 @@ fn view_header(s: &MainState) -> Element<Message> {
             recovery_badge,
             busy_badge,
             horizontal_space(),
-            button(text("⟳").size(14).color(C_DIM))
+            button(text("~").size(14).color(C_DIM))
                 .on_press(Message::Refresh)
                 .style(style_btn_ghost)
                 .padding([4, 8]),
             horizontal_space().width(4),
-            button(text("← Back").size(12).color(C_DIM))
+            button(text("< Back").size(12).color(C_DIM))
                 .on_press(Message::BackToPicker)
                 .style(style_btn_ghost)
                 .padding([4, 10]),
@@ -1075,7 +1039,7 @@ fn view_routes_panel(s: &MainState) -> Element<Message> {
         && !s.busy;
 
     let switch_btn = {
-        let b = button(text("→ Switch to").size(12))
+        let b = button(text("> Switch to").size(12))
             .style(style_btn_secondary)
             .padding([5, 10])
             .width(Length::Fill);
@@ -1087,7 +1051,7 @@ fn view_routes_panel(s: &MainState) -> Element<Message> {
     };
 
     let rename_btn = {
-        let b = button(text("✎ Rename").size(12))
+        let b = button(text("Rename").size(12))
             .style(style_btn_secondary)
             .padding([5, 10])
             .width(Length::Fill);
@@ -1098,27 +1062,8 @@ fn view_routes_panel(s: &MainState) -> Element<Message> {
         }
     };
 
-    let can_delete = s
-        .routes
-        .get(s.sel_route)
-        .map(|r| !r.is_current && !is_recovery_branch_name(&r.name))
-        .unwrap_or(false)
-        && !s.busy;
-
-    let delete_btn = {
-        let b = button(text("✕ Delete Route").size(12).color(C_ERROR))
-            .style(style_btn_ghost)
-            .padding([5, 10])
-            .width(Length::Fill);
-        if can_delete {
-            b.on_press(Message::BeginDeleteRoute)
-        } else {
-            b
-        }
-    };
-
     let recovery_label =
-        if s.is_recovery { "✕ Exit Recovery" } else { "⚕ Recovery Mode" };
+        if s.is_recovery { "Exit Recovery" } else { "Recovery Mode" };
     let recovery_color = if s.is_recovery { C_WARN } else { C_DIM };
 
     container(
@@ -1144,8 +1089,6 @@ fn view_routes_panel(s: &MainState) -> Element<Message> {
             switch_btn,
             vertical_space().height(2),
             rename_btn,
-            vertical_space().height(2),
-            delete_btn,
             vertical_space().height(8),
             button(text(recovery_label).size(12).color(recovery_color))
                 .on_press(Message::ToggleRecovery)
@@ -1239,14 +1182,14 @@ fn view_save_bar(s: &MainState) -> Element<Message> {
     };
 
     let save_btn = {
-        let b = button(text("💾 Save").size(13))
+        let b = button(text("Save").size(13))
             .style(style_btn_primary)
             .padding([7, 14]);
         if s.busy { b } else { b.on_press(Message::TrySave) }
     };
 
     let force_btn = {
-        let b = button(text("⚡ Force Save").size(13))
+        let b = button(text("Force Save").size(13))
             .style(style_btn_secondary)
             .padding([7, 14]);
         if s.busy { b } else { b.on_press(Message::ForceSave) }
@@ -1254,7 +1197,7 @@ fn view_save_bar(s: &MainState) -> Element<Message> {
 
     let rollback_btn = {
         let enabled = !s.history.is_empty() && !s.busy;
-        let b = button(text("↩ Rollback").size(13))
+        let b = button(text("Rollback").size(13))
             .style(if enabled { style_btn_secondary } else { style_btn_disabled })
             .padding([7, 14]);
         if enabled { b.on_press(Message::BeginRollback) } else { b }
@@ -1263,7 +1206,7 @@ fn view_save_bar(s: &MainState) -> Element<Message> {
     let discard_btn = {
         let enabled = s.is_dirty() && !s.busy;
         let label_color = if enabled { C_ERROR } else { C_DIM };
-        let b = button(text("✕ Discard").size(13).color(label_color))
+        let b = button(text("Discard").size(13).color(label_color))
             .style(style_btn_ghost)
             .padding([7, 14]);
         if enabled { b.on_press(Message::BeginDiscard) } else { b }
@@ -1271,7 +1214,7 @@ fn view_save_bar(s: &MainState) -> Element<Message> {
 
     let amend_btn = {
         let enabled = !s.history.is_empty() && !s.busy;
-        let b = button(text("✎ Amend").size(13).color(C_DIM))
+        let b = button(text("Amend").size(13).color(C_DIM))
             .style(style_btn_ghost)
             .padding([7, 14]);
         if enabled { b.on_press(Message::BeginAmend) } else { b }
@@ -1316,7 +1259,7 @@ fn view_status_bar(s: &MainState) -> Element<Message> {
     let content: Element<Message> = match &s.status {
         None => text("Loading status…").size(12).color(C_DIM).into(),
         Some(status) if !status.has_uncommitted_changes => {
-            text("✓  Working directory clean").size(12).color(C_SUCCESS).into()
+            text("Working directory clean").size(12).color(C_SUCCESS).into()
         }
         Some(status) => {
             let n = status.pending_changes.len();
@@ -1344,7 +1287,7 @@ fn view_status_bar(s: &MainState) -> Element<Message> {
             };
 
             column![
-                text(format!("⚠  {n} uncommitted change(s)"))
+                text(format!("!  {n} uncommitted change(s)"))
                     .size(12)
                     .color(C_WARN),
                 column(file_rows).spacing(2),
@@ -1647,11 +1590,6 @@ fn rename_route(dir: PathBuf, old_name: String, new_name: String) -> Result<(), 
 fn discard_changes(dir: PathBuf) -> Result<(), String> {
     let core = Git2Core::open(&dir).map_err(|e| e.to_string())?;
     SaveManager::new(core).discard_changes().map_err(|e| e.to_string())
-}
-
-fn delete_route(dir: PathBuf, name: String) -> Result<(), String> {
-    let core = Git2Core::open(&dir).map_err(|e| e.to_string())?;
-    RouteManager::new(core).delete_route(&name).map_err(|e| e.to_string())
 }
 
 fn amend_message(dir: PathBuf, message: String) -> Result<(), String> {

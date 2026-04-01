@@ -27,9 +27,8 @@ jobs:
           body: |
             ## 下载
             
-            ### Windows (x86_64) — 推荐
-            - `gitsave-gui-windows-x86_64.msi` — **图形安装包**（推荐，双击安装即可）
-            - `gitsave-gui-windows-x86_64.exe` — GUI 便携版（无需安装，直接运行）
+            ### Windows (x86_64)
+            - `gitsave-gui-windows-x86_64.exe` — GUI 便携版（直接运行）
             - `gitsave-windows-x86_64.exe` — TUI/命令行版
             
             ### Linux (x86_64)
@@ -164,7 +163,7 @@ jobs:
           asset_name: gitsave-windows-x86_64.exe
           asset_content_type: application/octet-stream
 
-  # 构建 Windows GUI 版本 (native MSVC runner) + MSI 安装包
+  # 构建 Windows GUI 版本 (native MSVC runner) - 仅便携版
   build-windows-gui:
     needs: create-release
     runs-on: windows-latest
@@ -187,31 +186,6 @@ jobs:
           upload_url: ${{ needs.create-release.outputs.upload_url }}
           asset_path: ./gitsave-gui-windows-x86_64.exe
           asset_name: gitsave-gui-windows-x86_64.exe
-          asset_content_type: application/octet-stream
-
-      - name: Add WiX Toolset v3 to PATH
-        run: echo "C:\Program Files (x86)\WiX Toolset v3.11\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Install cargo-wix
-        run: cargo install cargo-wix --version "0.3.9" --locked
-
-      - name: Build MSI installer
-        run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          cargo wix --no-build --nocapture -dVersion=$version
-          # Rename to a stable filename independent of the version number
-          $msi = Get-ChildItem -Path target\wix -Filter "gitsave-*.msi" | Select-Object -First 1
-          if (-not $msi) { throw "MSI not found in target\wix" }
-          Move-Item $msi.FullName "target\wix\gitsave-gui-windows-x86_64.msi"
-
-      - name: Upload Windows MSI installer
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./target/wix/gitsave-gui-windows-x86_64.msi
-          asset_name: gitsave-gui-windows-x86_64.msi
           asset_content_type: application/octet-stream
 
   # 构建 macOS TUI 版本 (x86_64)
