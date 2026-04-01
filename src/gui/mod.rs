@@ -12,6 +12,8 @@ use iced::widget::{
 };
 use iced::{Alignment, Background, Border, Color, Element, Length, Size, Task, Theme, window};
 
+use chrono::Local;
+
 use crate::cache::{RecentPathCache, RecentPathEntry};
 use crate::core::{ChangeStatus, RouteInfo, SaveEntry, SaveStatus};
 use crate::error::SaveError;
@@ -117,7 +119,6 @@ struct MainState {
     status: Option<SaveStatus>,
     sel_route: usize,
     sel_hist: usize,
-    save_msg: String,
     modal: Option<Modal>,
     notif: Option<Notif>,
     is_recovery: bool,
@@ -136,7 +137,6 @@ impl MainState {
             status: None,
             sel_route: 0,
             sel_hist: 0,
-            save_msg: String::new(),
             modal: None,
             notif: None,
             is_recovery: false,
@@ -152,6 +152,10 @@ impl MainState {
 
     fn selected_route_name(&self) -> Option<String> {
         self.selected_route().map(|r| r.name.clone())
+    }
+
+    fn selected_route_is_current(&self) -> bool {
+        self.selected_route().map(|r| r.is_current).unwrap_or(true)
     }
 
     fn selected_history_entry(&self) -> Option<&SaveEntry> {
@@ -225,10 +229,12 @@ enum Modal {
 enum ConfirmAction {
     SwitchRoute { name: String },
     DiscardChanges,
+    Pending(PendingAction),
 }
 
 #[derive(Debug, Clone)]
 enum TextAction {
+    Save { mode: SaveMode },
     RollbackNewRoute { target_id: String },
     CreateRoute,
     CreateSwitchRoute,
@@ -239,9 +245,9 @@ enum TextAction {
 
 #[derive(Debug, Clone)]
 enum PendingAction {
-    RollbackSave { target_id: String, label: String },
+    RollbackSave { target_id: String, label: String, force: bool },
     CreateRoute { name: String, switch: bool },
-    SwitchRoute { name: String },
+    SwitchRoute { name: String, force: bool },
     RecoverRoute { old_name: String, new_name: String },
 }
 
@@ -249,6 +255,12 @@ enum PendingAction {
 struct SaveRequest {
     message: String,
     after: Option<PendingAction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveMode {
+    Stable,
+    Force,
 }
 
 #[derive(Debug, Clone)]
@@ -300,6 +312,7 @@ enum Message {
     PickerOpenRecent(PathBuf),
     PickerSelectManage(PathBuf),
     PickerManageOpen,
+    PickerManageInit,
     PickerManageExportNameChanged(String),
     PickerManageExport,
     PickerManageCleanupChanged(String),
@@ -321,7 +334,6 @@ enum Message {
     SelectRoute(usize),
     SelectHistory(usize),
     // Main – save
-    SaveMsgChanged(String),
     TrySave,
     ForceSave,
     SaveDone(SaveResponse),
@@ -332,11 +344,13 @@ enum Message {
     BeginCreateRoute,
     BeginCreateSwitchRoute,
     BeginSwitchRoute,
+    BeginForceSwitchRoute,
     BeginRenameRoute,
     BeginRecoverRoute,
     // Main – misc
     BeginDiscard,
     BeginAmend,
+    BeginForceRollback,
     ToggleRecovery,
     // Modal
     ModalInput(String),
@@ -409,26 +423,41 @@ impl GitsaveApp {
                     Screen::Picker(p) => PathBuf::from(p.input.trim()),
                     _ => return Task::none(),
                 };
-                self.open_path(path)
+                if let Screen::Picker(p) = &mut self.screen {
+                    let raw = p.input.trim();
+                    if raw.is_empty() {
+                        p.error = Some("Path cannot be empty".to_string());
+                        return Task::none();
+                    }
+                    if !path.exists() {
+                        p.error = Some("Path does not exist".to_string());
+                        return Task::none();
+                    }
+                    if !path.is_dir() {
+                        p.error = Some("Path is not a directory".to_string());
+                        return Task::none();
+                    }
+                }
+                self.set_picker_manage(path)
             }
 
             Message::PickerOpenRecent(path) => self.open_path(path),
 
-            Message::PickerSelectManage(path) => {
+            Message::PickerSelectManage(path) => self.set_picker_manage(path),
+
+            Message::PickerManageOpen => {
                 if let Screen::Picker(p) = &mut self.screen {
-                    let path_label = path.to_string_lossy().to_string();
-                    let last_used = p
-                        .recent
-                        .iter()
-                        .find(|entry| entry.path == path_label)
-                        .and_then(|entry| if entry.last_used > 0 { Some(entry.last_used) } else { None });
-                    p.manage = Some(build_manage_state(path, last_used));
-                    p.error = None;
+                    if let Some(m) = &mut p.manage {
+                        if m.info.has_gitsave {
+                            return self.open_path(m.target.clone());
+                        }
+                        m.message = Some("No gitsave found. Use Init to create one.".to_string());
+                    }
                 }
                 Task::none()
             }
 
-            Message::PickerManageOpen => {
+            Message::PickerManageInit => {
                 let path = match &self.screen {
                     Screen::Picker(p) => p.manage.as_ref().map(|m| m.target.clone()),
                     _ => None,
@@ -692,43 +721,38 @@ impl GitsaveApp {
             }
 
             // ── Main – save ──────────────────────────────────────────────────
-            Message::SaveMsgChanged(v) => {
+            Message::TrySave => {
                 if let Screen::Main(s) = &mut self.screen {
-                    s.save_msg = v;
+                    if s.is_recovery {
+                        s.notify_err("Exit recovery mode to save.");
+                        return Task::none();
+                    }
+                    if !s.is_dirty() {
+                        s.notify_ok("Working tree clean; no save needed. Use Force Save.");
+                        return Task::none();
+                    }
+                    s.modal = Some(Modal::TextInput {
+                        prompt: "Save description (optional):".to_string(),
+                        value: String::new(),
+                        action: TextAction::Save { mode: SaveMode::Stable },
+                    });
                 }
                 Task::none()
             }
 
-            Message::TrySave => {
-                let (dir, msg) = match &mut self.screen {
-                    Screen::Main(s) => {
-                        s.busy = true;
-                        s.notif = None;
-                        (s.dir.clone(), s.save_msg.trim().to_string())
-                    }
-                    _ => return Task::none(),
-                };
-                let request = SaveRequest { message: msg, after: None };
-                Task::perform(
-                    async move { do_save_request(dir, request, false) },
-                    Message::SaveDone,
-                )
-            }
-
             Message::ForceSave => {
-                let (dir, msg) = match &mut self.screen {
-                    Screen::Main(s) => {
-                        s.busy = true;
-                        s.notif = None;
-                        (s.dir.clone(), s.save_msg.trim().to_string())
+                if let Screen::Main(s) = &mut self.screen {
+                    if s.is_recovery {
+                        s.notify_err("Exit recovery mode to save.");
+                        return Task::none();
                     }
-                    _ => return Task::none(),
-                };
-                let request = SaveRequest { message: msg, after: None };
-                Task::perform(
-                    async move { do_save_request(dir, request, true) },
-                    Message::SaveDone,
-                )
+                    s.modal = Some(Modal::TextInput {
+                        prompt: "Force save description (optional):".to_string(),
+                        value: String::new(),
+                        action: TextAction::Save { mode: SaveMode::Force },
+                    });
+                }
+                Task::none()
             }
 
             Message::SaveDone(response) => {
@@ -737,7 +761,6 @@ impl GitsaveApp {
                     match response.outcome {
                         SaveOutcome::Saved(label) => {
                             s.notify_ok(format!("Saved: {label}"));
-                            s.save_msg.clear();
                             if let Some(action) = response.request.after {
                                 return self.execute_pending_action(action);
                             }
@@ -760,28 +783,67 @@ impl GitsaveApp {
             // ── Main – rollback ──────────────────────────────────────────────
             Message::BeginRollback => {
                 if let Screen::Main(s) = &mut self.screen {
+                    if s.is_recovery {
+                        s.notify_err("Exit recovery mode to roll back.");
+                        return Task::none();
+                    }
+                    if !s.selected_route_is_current() {
+                        s.notify_err("Rollback locked. Switch to this route first.");
+                        return Task::none();
+                    }
                     if let Some(entry) = s.selected_history_entry().cloned() {
+                        let action = PendingAction::RollbackSave {
+                            target_id: entry.id,
+                            label: entry.message,
+                            force: false,
+                        };
                         if s.is_dirty() {
                             s.modal = Some(Modal::ResolveDirty {
                                 prompt: format!(
                                     "Roll back to:\n  [{}] {}\n\nSave changes first?",
                                     entry.short_id, entry.message
                                 ),
-                                action: PendingAction::RollbackSave {
-                                    target_id: entry.id,
-                                    label: entry.message,
-                                },
+                                action,
                             });
                         } else {
-                            s.modal = Some(Modal::TextInput {
+                            s.modal = Some(Modal::Confirm {
                                 prompt: format!(
-                                    "Roll back to:\n  [{}] {}\n\nEnter a name for the new route:",
+                                    "Roll back to save {} ({})? A new route will be created.",
                                     entry.short_id, entry.message
                                 ),
-                                value: String::new(),
-                                action: TextAction::RollbackNewRoute { target_id: entry.id },
+                                action: ConfirmAction::Pending(action),
                             });
                         }
+                    } else {
+                        s.notify_err("No save selected");
+                    }
+                }
+                Task::none()
+            }
+
+            Message::BeginForceRollback => {
+                if let Screen::Main(s) = &mut self.screen {
+                    if s.is_recovery {
+                        s.notify_err("Exit recovery mode to roll back.");
+                        return Task::none();
+                    }
+                    if !s.selected_route_is_current() {
+                        s.notify_err("Rollback locked. Switch to this route first.");
+                        return Task::none();
+                    }
+                    if let Some(entry) = s.selected_history_entry().cloned() {
+                        let action = PendingAction::RollbackSave {
+                            target_id: entry.id,
+                            label: entry.message,
+                            force: true,
+                        };
+                        s.modal = Some(Modal::Confirm {
+                            prompt: format!(
+                                "Force roll back to save {} ({})? Unsaved changes will be discarded. A new route will be created.",
+                                entry.short_id, entry.message
+                            ),
+                            action: ConfirmAction::Pending(action),
+                        });
                     } else {
                         s.notify_err("No save selected");
                     }
@@ -803,6 +865,10 @@ impl GitsaveApp {
             // ── Main – route management ──────────────────────────────────────
             Message::BeginCreateRoute => {
                 if let Screen::Main(s) = &mut self.screen {
+                    if s.is_recovery {
+                        s.notify_err("Exit recovery mode to manage routes.");
+                        return Task::none();
+                    }
                     s.modal = Some(Modal::TextInput {
                         prompt: "Create new route:".to_string(),
                         value: String::new(),
@@ -814,6 +880,10 @@ impl GitsaveApp {
 
             Message::BeginCreateSwitchRoute => {
                 if let Screen::Main(s) = &mut self.screen {
+                    if s.is_recovery {
+                        s.notify_err("Exit recovery mode to manage routes.");
+                        return Task::none();
+                    }
                     s.modal = Some(Modal::TextInput {
                         prompt: "Create and switch to new route:".to_string(),
                         value: String::new(),
@@ -824,7 +894,7 @@ impl GitsaveApp {
             }
 
             Message::BeginSwitchRoute => {
-                let (dir, name, is_dirty) = match &self.screen {
+                let (name, is_dirty) = match &self.screen {
                     Screen::Main(s) => match s.selected_route() {
                         Some(r) if r.is_current => {
                             if let Screen::Main(ms) = &mut self.screen {
@@ -832,7 +902,13 @@ impl GitsaveApp {
                             }
                             return Task::none();
                         }
-                        Some(r) => (s.dir.clone(), r.name.clone(), s.is_dirty()),
+                        Some(_) if s.is_recovery => {
+                            if let Screen::Main(ms) = &mut self.screen {
+                                ms.notify_err("Exit recovery mode to switch routes.");
+                            }
+                            return Task::none();
+                        }
+                        Some(r) => (r.name.clone(), s.is_dirty()),
                         None => return Task::none(),
                     },
                     _ => return Task::none(),
@@ -845,23 +921,58 @@ impl GitsaveApp {
                                 "Switch to route '{}' with unsaved changes?",
                                 name
                             ),
-                            action: PendingAction::SwitchRoute { name },
+                            action: PendingAction::SwitchRoute { name, force: false },
                         });
                     }
                     Task::none()
                 } else {
                     if let Screen::Main(s) = &mut self.screen {
-                        s.busy = true;
+                        s.modal = Some(Modal::Confirm {
+                            prompt: format!("Switch to route '{}'?", name),
+                            action: ConfirmAction::Pending(PendingAction::SwitchRoute {
+                                name,
+                                force: false,
+                            }),
+                        });
                     }
-                    Task::perform(
-                        async move { switch_route(dir, name) },
-                        Message::ActionDone,
-                    )
+                    Task::none()
                 }
+            }
+
+            Message::BeginForceSwitchRoute => {
+                if let Screen::Main(s) = &mut self.screen {
+                    if s.is_recovery {
+                        s.notify_err("Exit recovery mode to switch routes.");
+                        return Task::none();
+                    }
+                    let route = match s.selected_route() {
+                        Some(r) if r.is_current => {
+                            s.notify_err("Already on this route");
+                            return Task::none();
+                        }
+                        Some(r) => r.name.clone(),
+                        None => return Task::none(),
+                    };
+                    s.modal = Some(Modal::Confirm {
+                        prompt: format!(
+                            "Force switch to route '{}'? Unsaved changes will be discarded.",
+                            route
+                        ),
+                        action: ConfirmAction::Pending(PendingAction::SwitchRoute {
+                            name: route,
+                            force: true,
+                        }),
+                    });
+                }
+                Task::none()
             }
 
             Message::BeginRenameRoute => {
                 if let Screen::Main(s) = &mut self.screen {
+                    if s.is_recovery {
+                        s.notify_err("Exit recovery mode to manage routes.");
+                        return Task::none();
+                    }
                     if let Some(r) = s.selected_route() {
                         let old = r.name.clone();
                         s.modal = Some(Modal::TextInput {
@@ -877,6 +988,7 @@ impl GitsaveApp {
             Message::BeginRecoverRoute => {
                 if let Screen::Main(s) = &mut self.screen {
                     if !s.is_recovery {
+                        s.notify_err("Recovery actions are only available in recovery mode.");
                         return Task::none();
                     }
                     if let Some(r) = s.selected_route() {
@@ -899,6 +1011,14 @@ impl GitsaveApp {
             // ── Main – misc ──────────────────────────────────────────────────
             Message::BeginDiscard => {
                 if let Screen::Main(s) = &mut self.screen {
+                    if s.is_recovery {
+                        s.notify_err("Exit recovery mode to discard changes.");
+                        return Task::none();
+                    }
+                    if !s.is_dirty() {
+                        s.notify_ok("Working tree already clean.");
+                        return Task::none();
+                    }
                     s.modal = Some(Modal::Confirm {
                         prompt: "Discard ALL unsaved changes?\n\
                                  (A recovery snapshot will be created.)\n\
@@ -912,6 +1032,14 @@ impl GitsaveApp {
 
             Message::BeginAmend => {
                 if let Screen::Main(s) = &mut self.screen {
+                    if s.is_recovery {
+                        s.notify_err("Exit recovery mode to amend saves.");
+                        return Task::none();
+                    }
+                    if s.is_dirty() {
+                        s.notify_err("Working tree dirty; save or discard changes first.");
+                        return Task::none();
+                    }
                     let current = s
                         .history
                         .first()
@@ -1169,6 +1297,20 @@ impl GitsaveApp {
         }
     }
 
+    fn set_picker_manage(&mut self, path: PathBuf) -> Task<Message> {
+        if let Screen::Picker(p) = &mut self.screen {
+            let path_label = path.to_string_lossy().to_string();
+            let last_used = p
+                .recent
+                .iter()
+                .find(|entry| entry.path == path_label)
+                .and_then(|entry| if entry.last_used > 0 { Some(entry.last_used) } else { None });
+            p.manage = Some(build_manage_state(path, last_used));
+            p.error = None;
+        }
+        Task::none()
+    }
+
     fn start_route_history_refresh(&mut self, route: String) -> Task<Message> {
         let dir = match &self.screen {
             Screen::Main(s) => s.dir.clone(),
@@ -1184,7 +1326,7 @@ impl GitsaveApp {
 
     fn execute_pending_action(&mut self, action: PendingAction) -> Task<Message> {
         match action {
-            PendingAction::RollbackSave { target_id, label } => {
+            PendingAction::RollbackSave { target_id, label, .. } => {
                 if let Screen::Main(s) = &mut self.screen {
                     s.modal = Some(Modal::TextInput {
                         prompt: format!(
@@ -1218,7 +1360,7 @@ impl GitsaveApp {
                     )
                 }
             }
-            PendingAction::SwitchRoute { name } => {
+            PendingAction::SwitchRoute { name, force } => {
                 let dir = match &mut self.screen {
                     Screen::Main(s) => {
                         s.busy = true;
@@ -1226,10 +1368,17 @@ impl GitsaveApp {
                     }
                     _ => return Task::none(),
                 };
-                Task::perform(
-                    async move { switch_route(dir, name) },
-                    Message::ActionDone,
-                )
+                if force {
+                    Task::perform(
+                        async move { force_switch_route(dir, name) },
+                        Message::ActionDone,
+                    )
+                } else {
+                    Task::perform(
+                        async move { switch_route(dir, name) },
+                        Message::ActionDone,
+                    )
+                }
             }
             PendingAction::RecoverRoute { old_name, new_name } => {
                 let dir = match &mut self.screen {
@@ -1277,11 +1426,43 @@ impl GitsaveApp {
                         Message::ActionDone,
                     )
                 }
+                ConfirmAction::Pending(action) => self.execute_pending_action(action),
             },
             Modal::ResolveDirty { .. } | Modal::ResolveUnstable { .. } => Task::none(),
             Modal::TextInput { value, action, .. } => {
                 let name = value.trim().to_string();
                 match action {
+                    TextAction::Save { mode } => {
+                        let dir = match &mut self.screen {
+                            Screen::Main(s) => {
+                                if s.is_recovery {
+                                    s.notify_err("Exit recovery mode to save.");
+                                    return Task::none();
+                                }
+                                if mode == SaveMode::Stable && !s.is_dirty() {
+                                    s.notify_ok(
+                                        "Working tree clean; no save needed. Use Force Save.",
+                                    );
+                                    return Task::none();
+                                }
+                                s.busy = true;
+                                s.notif = None;
+                                s.dir.clone()
+                            }
+                            _ => return Task::none(),
+                        };
+                        let message = if name.is_empty() {
+                            save_message_for_mode(mode)
+                        } else {
+                            name
+                        };
+                        let force = mode == SaveMode::Force;
+                        let request = SaveRequest { message, after: None };
+                        return Task::perform(
+                            async move { do_save_request(dir, request, force) },
+                            Message::SaveDone,
+                        );
+                    }
                     TextAction::RollbackNewRoute { target_id } => {
                         if name.is_empty() {
                             if let Screen::Main(s) = &mut self.screen {
@@ -1319,6 +1500,14 @@ impl GitsaveApp {
                             }
                             return Task::none();
                         }
+                        if !is_valid_route_name(&name) {
+                            if let Screen::Main(s) = &mut self.screen {
+                                s.notify_err(
+                                    "Invalid route name. Use letters, digits, '-', '_', '/'.",
+                                );
+                            }
+                            return Task::none();
+                        }
                         if let Screen::Main(s) = &mut self.screen {
                             if s.is_dirty() {
                                 s.modal = Some(Modal::ResolveDirty {
@@ -1330,18 +1519,16 @@ impl GitsaveApp {
                                 });
                                 return Task::none();
                             }
+                            s.modal = Some(Modal::Confirm {
+                                prompt: format!("Create new route '{}'?", name),
+                                action: ConfirmAction::Pending(PendingAction::CreateRoute {
+                                    name,
+                                    switch: false,
+                                }),
+                            });
+                            return Task::none();
                         }
-                        let dir = match &mut self.screen {
-                            Screen::Main(s) => {
-                                s.busy = true;
-                                s.dir.clone()
-                            }
-                            _ => return Task::none(),
-                        };
-                        Task::perform(
-                            async move { create_route(dir, name) },
-                            Message::ActionDone,
-                        )
+                        Task::none()
                     }
                     TextAction::CreateSwitchRoute => {
                         if name.is_empty() {
@@ -1351,6 +1538,14 @@ impl GitsaveApp {
                                     value: String::new(),
                                     action: TextAction::CreateSwitchRoute,
                                 });
+                            }
+                            return Task::none();
+                        }
+                        if !is_valid_route_name(&name) {
+                            if let Screen::Main(s) = &mut self.screen {
+                                s.notify_err(
+                                    "Invalid route name. Use letters, digits, '-', '_', '/'.",
+                                );
                             }
                             return Task::none();
                         }
@@ -1365,34 +1560,47 @@ impl GitsaveApp {
                                 });
                                 return Task::none();
                             }
-                        }
-                        let dir = match &mut self.screen {
-                            Screen::Main(s) => {
-                                s.busy = true;
-                                s.dir.clone()
-                            }
-                            _ => return Task::none(),
-                        };
-                        Task::perform(
-                            async move { create_switch_route(dir, name) },
-                            Message::ActionDone,
-                        )
-                    }
-                    TextAction::RenameRoute { old_name } => {
-                        if name.is_empty() || name == old_name {
+                            s.modal = Some(Modal::Confirm {
+                                prompt: format!("Create and switch to route '{}'?", name),
+                                action: ConfirmAction::Pending(PendingAction::CreateRoute {
+                                    name,
+                                    switch: true,
+                                }),
+                            });
                             return Task::none();
                         }
-                        let dir = match &mut self.screen {
-                            Screen::Main(s) => {
-                                s.busy = true;
-                                s.dir.clone()
+                        Task::none()
+                    }
+                    TextAction::RenameRoute { old_name } => {
+                        if let Screen::Main(s) = &mut self.screen {
+                            if name.is_empty() {
+                                s.notify_err("Route name cannot be empty.");
+                                return Task::none();
                             }
-                            _ => return Task::none(),
-                        };
-                        Task::perform(
-                            async move { rename_route(dir, old_name, name) },
-                            Message::ActionDone,
-                        )
+                            if !is_valid_route_name(&name) {
+                                s.notify_err("Invalid route name. Use letters, digits, '-', '_', '/'.");
+                                return Task::none();
+                            }
+                            if name == old_name {
+                                s.notify_ok("Route name unchanged.");
+                                return Task::none();
+                            }
+                            if let Ok(core) = Git2Core::open(&s.dir) {
+                                if let Ok(routes) = core.list_routes() {
+                                    if routes.iter().any(|route| route.name == name) {
+                                        s.notify_err(format!("Route '{}' already exists.", name));
+                                        return Task::none();
+                                    }
+                                }
+                            }
+                            s.busy = true;
+                            let dir = s.dir.clone();
+                            return Task::perform(
+                                async move { rename_route(dir, old_name, name) },
+                                Message::ActionDone,
+                            );
+                        }
+                        Task::none()
                     }
                     TextAction::AmendMessage => {
                         if name.is_empty() {
@@ -1414,41 +1622,41 @@ impl GitsaveApp {
                         let short_hash = old_name.chars().take(7).collect::<String>();
                         let fallback = format!("recovery-{short_hash}");
                         let new_name = if name.is_empty() { fallback } else { name };
-                        let dir = match &mut self.screen {
-                            Screen::Main(s) => {
-                                if !is_valid_route_name(&new_name) {
-                                    s.notify_err("Invalid route name. Use letters, digits, '-', '_', '/'.");
-                                    return Task::none();
-                                }
-                                if let Ok(core) = Git2Core::open(&s.dir) {
-                                    if let Ok(routes) = core.list_routes() {
-                                        if routes.iter().any(|route| route.name == new_name) {
-                                            s.notify_err(format!("Route '{}' already exists.", new_name));
-                                            return Task::none();
-                                        }
+                        if let Screen::Main(s) = &mut self.screen {
+                            if !is_valid_route_name(&new_name) {
+                                s.notify_err("Invalid route name. Use letters, digits, '-', '_', '/'.");
+                                return Task::none();
+                            }
+                            if let Ok(core) = Git2Core::open(&s.dir) {
+                                if let Ok(routes) = core.list_routes() {
+                                    if routes.iter().any(|route| route.name == new_name) {
+                                        s.notify_err(format!("Route '{}' already exists.", new_name));
+                                        return Task::none();
                                     }
                                 }
-                                if s.is_dirty() {
-                                    s.modal = Some(Modal::ResolveDirty {
-                                        prompt: format!(
-                                            "Recover snapshot and switch to route '{new_name}'?",
-                                        ),
-                                        action: PendingAction::RecoverRoute {
-                                            old_name,
-                                            new_name,
-                                        },
-                                    });
-                                    return Task::none();
-                                }
-                                s.busy = true;
-                                s.dir.clone()
                             }
-                            _ => return Task::none(),
-                        };
-                        Task::perform(
-                            async move { recover_route(dir, old_name, new_name) },
-                            Message::ActionDone,
-                        )
+                            if s.is_dirty() {
+                                s.modal = Some(Modal::ResolveDirty {
+                                    prompt: format!(
+                                        "Recover snapshot and switch to route '{new_name}'?",
+                                    ),
+                                    action: PendingAction::RecoverRoute {
+                                        old_name,
+                                        new_name,
+                                    },
+                                });
+                                return Task::none();
+                            }
+                            s.modal = Some(Modal::Confirm {
+                                prompt: "Recover this snapshot and switch to the route?"
+                                    .to_string(),
+                                action: ConfirmAction::Pending(PendingAction::RecoverRoute {
+                                    old_name,
+                                    new_name,
+                                }),
+                            });
+                        }
+                        Task::none()
                     }
                 }
             }
@@ -1480,7 +1688,7 @@ fn view_picker(s: &PickerState) -> Element<Message> {
             .style(style_btn_secondary)
             .padding([8, 12]),
         horizontal_space().width(4),
-        button(text("  Open  ").size(14))
+        button(text("  Manage  ").size(14))
             .on_press(Message::PickerSubmit)
             .style(style_btn_primary)
             .padding([8, 18]),
@@ -1500,20 +1708,12 @@ fn view_picker(s: &PickerState) -> Element<Message> {
                 } else {
                     format!("{} · last used {}", p.path, last_used)
                 };
-                row![
-                    button(text(label).size(13))
-                        .on_press(Message::PickerOpenRecent(path.clone()))
-                        .style(style_btn_ghost)
-                        .padding([5, 10])
-                        .width(Length::Fill),
-                    horizontal_space().width(6),
-                    button(text("Manage").size(12).color(C_DIM))
-                        .on_press(Message::PickerSelectManage(path))
-                        .style(style_btn_ghost)
-                        .padding([4, 8]),
-                ]
-                .align_y(Alignment::Center)
-                .into()
+                button(text(label).size(13))
+                    .on_press(Message::PickerSelectManage(path))
+                    .style(style_btn_ghost)
+                    .padding([5, 10])
+                    .width(Length::Fill)
+                    .into()
             })
             .collect()
     };
@@ -1710,6 +1910,9 @@ fn view_picker_manage_panel(m: &PickerManageState) -> Element<Message> {
         vertical_space().height(0).into()
     };
 
+    let can_open = m.info.has_gitsave;
+    let can_init = !m.info.has_gitsave;
+
     container(
         column![
             text("Manage Selected Path").size(12).color(C_DIM),
@@ -1722,10 +1925,19 @@ fn view_picker_manage_panel(m: &PickerManageState) -> Element<Message> {
             text(format!("Repo size: {repo_size}")).size(12).color(C_DIM),
             vertical_space().height(10),
             row![
-                button(text("Open").size(12))
-                    .on_press(Message::PickerManageOpen)
-                    .style(style_btn_secondary)
-                    .padding([5, 10]),
+                {
+                    let b = button(text("Open").size(12))
+                        .style(if can_open { style_btn_secondary } else { style_btn_disabled })
+                        .padding([5, 10]);
+                    if can_open { b.on_press(Message::PickerManageOpen) } else { b }
+                },
+                horizontal_space().width(6),
+                {
+                    let b = button(text("Init").size(12))
+                        .style(if can_init { style_btn_secondary } else { style_btn_disabled })
+                        .padding([5, 10]);
+                    if can_init { b.on_press(Message::PickerManageInit) } else { b }
+                },
             ]
             .align_y(Alignment::Center),
             vertical_space().height(10),
@@ -1885,12 +2097,13 @@ fn view_routes_panel(s: &MainState) -> Element<Message> {
             .collect()
     };
 
+    let can_manage_routes = !s.busy && !s.is_recovery;
     let can_switch = s
         .routes
         .get(s.sel_route)
         .map(|r| !r.is_current)
         .unwrap_or(false)
-        && !s.busy;
+        && can_manage_routes;
 
     let switch_btn = {
         let b = button(text("> Switch to").size(12))
@@ -1904,12 +2117,24 @@ fn view_routes_panel(s: &MainState) -> Element<Message> {
         }
     };
 
+    let force_switch_btn = {
+        let b = button(text("! Force Switch").size(12))
+            .style(style_btn_secondary)
+            .padding([5, 10])
+            .width(Length::Fill);
+        if can_switch {
+            b.on_press(Message::BeginForceSwitchRoute)
+        } else {
+            b
+        }
+    };
+
     let rename_btn = {
         let b = button(text("Rename").size(12))
             .style(style_btn_secondary)
             .padding([5, 10])
             .width(Length::Fill);
-        if !s.routes.is_empty() && !s.busy {
+        if !s.routes.is_empty() && can_manage_routes {
             b.on_press(Message::BeginRenameRoute)
         } else {
             b
@@ -1949,19 +2174,25 @@ fn view_routes_panel(s: &MainState) -> Element<Message> {
             vertical_space().height(8),
             horizontal_rule(1),
             vertical_space().height(6),
-            button(text("+ Create").size(12))
-                .on_press(Message::BeginCreateRoute)
-                .style(style_btn_secondary)
-                .padding([5, 10])
-                .width(Length::Fill),
+            {
+                let b = button(text("+ Create").size(12))
+                    .style(if can_manage_routes { style_btn_secondary } else { style_btn_disabled })
+                    .padding([5, 10])
+                    .width(Length::Fill);
+                if can_manage_routes { b.on_press(Message::BeginCreateRoute) } else { b }
+            },
             vertical_space().height(2),
-            button(text("+ Create & Switch").size(12))
-                .on_press(Message::BeginCreateSwitchRoute)
-                .style(style_btn_secondary)
-                .padding([5, 10])
-                .width(Length::Fill),
+            {
+                let b = button(text("+ Create & Switch").size(12))
+                    .style(if can_manage_routes { style_btn_secondary } else { style_btn_disabled })
+                    .padding([5, 10])
+                    .width(Length::Fill);
+                if can_manage_routes { b.on_press(Message::BeginCreateSwitchRoute) } else { b }
+            },
             vertical_space().height(2),
             switch_btn,
+            vertical_space().height(2),
+            force_switch_btn,
             vertical_space().height(2),
             rename_btn,
             recovery_spacer,
@@ -2044,44 +2275,45 @@ fn view_history_panel(s: &MainState) -> Element<Message> {
 // ── Save bar ──────────────────────────────────────────────────────────────────
 
 fn view_save_bar(s: &MainState) -> Element<Message> {
-    let placeholder = if s.busy { "Processing…" } else { "Save description (optional)…" };
-
-    let input = {
-        let ti = text_input(placeholder, &s.save_msg)
-            .size(13)
-            .padding([7, 10])
-            .width(Length::Fill);
-        if s.busy {
-            ti
-        } else {
-            ti.on_input(Message::SaveMsgChanged).on_submit(Message::TrySave)
-        }
-    };
-
+    let save_enabled = !s.busy && !s.is_recovery;
     let save_btn = {
         let b = button(text("Save").size(13))
             .style(style_btn_primary)
             .padding([7, 14]);
-        if s.busy { b } else { b.on_press(Message::TrySave) }
+        if save_enabled { b.on_press(Message::TrySave) } else { b }
     };
 
     let force_btn = {
         let b = button(text("Force Save").size(13))
             .style(style_btn_secondary)
             .padding([7, 14]);
-        if s.busy { b } else { b.on_press(Message::ForceSave) }
+        if save_enabled { b.on_press(Message::ForceSave) } else { b }
     };
 
     let rollback_btn = {
-        let enabled = !s.history.is_empty() && !s.busy;
+        let enabled = !s.history.is_empty()
+            && s.selected_route_is_current()
+            && !s.busy
+            && !s.is_recovery;
         let b = button(text("Rollback").size(13))
             .style(if enabled { style_btn_secondary } else { style_btn_disabled })
             .padding([7, 14]);
         if enabled { b.on_press(Message::BeginRollback) } else { b }
     };
 
+    let force_rollback_btn = {
+        let enabled = !s.history.is_empty()
+            && s.selected_route_is_current()
+            && !s.busy
+            && !s.is_recovery;
+        let b = button(text("Force Rollback").size(13))
+            .style(if enabled { style_btn_secondary } else { style_btn_disabled })
+            .padding([7, 14]);
+        if enabled { b.on_press(Message::BeginForceRollback) } else { b }
+    };
+
     let discard_btn = {
-        let enabled = s.is_dirty() && !s.busy;
+        let enabled = s.is_dirty() && !s.busy && !s.is_recovery;
         let label_color = if enabled { C_ERROR } else { C_DIM };
         let b = button(text("Discard").size(13).color(label_color))
             .style(style_btn_ghost)
@@ -2090,7 +2322,7 @@ fn view_save_bar(s: &MainState) -> Element<Message> {
     };
 
     let amend_btn = {
-        let enabled = !s.history.is_empty() && !s.busy;
+        let enabled = !s.history.is_empty() && !s.busy && !s.is_recovery && !s.is_dirty();
         let b = button(text("Amend").size(13).color(C_DIM))
             .style(style_btn_ghost)
             .padding([7, 14]);
@@ -2107,12 +2339,18 @@ fn view_save_bar(s: &MainState) -> Element<Message> {
 
     container(
         column![
-            row![input, horizontal_space().width(6), save_btn, horizontal_space().width(4), force_btn,]
-                .align_y(Alignment::Center),
-            vertical_space().height(6),
             row![
+                save_btn,
+                horizontal_space().width(4),
+                force_btn,
+                horizontal_space().width(8),
                 rollback_btn,
                 horizontal_space().width(4),
+                force_rollback_btn,
+            ]
+            .align_y(Alignment::Center),
+            vertical_space().height(6),
+            row![
                 discard_btn,
                 horizontal_space().width(4),
                 amend_btn,
@@ -2518,6 +2756,12 @@ fn rollback_to_new_route(
 fn switch_route(dir: PathBuf, name: String) -> Result<(), String> {
     let core = Git2Core::open(&dir).map_err(|e| e.to_string())?;
     RouteManager::new(core).switch_route(&name).map_err(|e| e.to_string())
+}
+
+fn force_switch_route(dir: PathBuf, name: String) -> Result<(), String> {
+    let mut core = Git2Core::open(&dir).map_err(|e| e.to_string())?;
+    core.discard_changes().map_err(|e| e.to_string())?;
+    core.switch_route(&name).map_err(|e| e.to_string())
 }
 
 fn create_route(dir: PathBuf, name: String) -> Result<(), String> {
@@ -2927,9 +3171,13 @@ fn zip_path(path: &Path) -> String {
 
 fn guard_message_for_action(action: &PendingAction) -> String {
     let detail = match action {
-        PendingAction::RollbackSave { target_id, .. } => {
+        PendingAction::RollbackSave { target_id, force, .. } => {
             let short = target_id.chars().take(7).collect::<String>();
-            format!("before rollback {}", short)
+            if *force {
+                format!("before force rollback {}", short)
+            } else {
+                format!("before rollback {}", short)
+            }
         }
         PendingAction::CreateRoute { name, switch } => {
             if *switch {
@@ -2938,10 +3186,24 @@ fn guard_message_for_action(action: &PendingAction) -> String {
                 format!("before create route {}", name)
             }
         }
-        PendingAction::SwitchRoute { name } => format!("before switch route {}", name),
+        PendingAction::SwitchRoute { name, force } => {
+            if *force {
+                format!("before force switch route {}", name)
+            } else {
+                format!("before switch route {}", name)
+            }
+        }
         PendingAction::RecoverRoute { new_name, .. } => format!("before recover route {}", new_name),
     };
     format!("[guard] {}", detail)
+}
+
+fn save_message_for_mode(mode: SaveMode) -> String {
+    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+    match mode {
+        SaveMode::Stable => format!("[quick] {}", timestamp),
+        SaveMode::Force => format!("[force] {}", timestamp),
+    }
 }
 
 fn is_valid_route_char(ch: char) -> bool {
