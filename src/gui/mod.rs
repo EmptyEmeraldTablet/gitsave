@@ -355,6 +355,7 @@ enum Message {
     BackToPicker,
 }
 
+#[derive(Debug, Clone)]
 enum InitOutcome {
     Ready,
     NeedsAuthor,
@@ -1012,10 +1013,11 @@ impl GitsaveApp {
                     }
                     _ => return Task::none(),
                 };
-                let action_clone = action.clone();
+                let action_for_task = action.clone();
+                let action_for_msg = action.clone();
                 Task::perform(
-                    async move { discard_then_action(dir, action_clone) },
-                    move |result| Message::DiscardThenActionDone(result, action),
+                    async move { discard_then_action(dir, action_for_task) },
+                    move |result| Message::DiscardThenActionDone(result, action_for_msg.clone()),
                 )
             }
 
@@ -1173,9 +1175,10 @@ impl GitsaveApp {
             _ => return Task::none(),
         };
         let route_clone = route.clone();
+        let route_for_msg = route.clone();
         Task::perform(
             async move { load_route_history_ids(dir, route_clone) },
-            move |result| Message::RouteHistoryLoaded { route, result },
+            move |result| Message::RouteHistoryLoaded { route: route_for_msg.clone(), result },
         )
     }
 
@@ -1701,6 +1704,12 @@ fn view_picker_manage_panel(m: &PickerManageState) -> Element<Message> {
         None => vertical_space().height(0).into(),
     };
 
+    let recovery_spacer: Element<Message> = if s.is_recovery {
+        vertical_space().height(2).into()
+    } else {
+        vertical_space().height(0).into()
+    };
+
     container(
         column![
             text("Manage Selected Path").size(12).color(C_DIM),
@@ -1708,11 +1717,9 @@ fn view_picker_manage_panel(m: &PickerManageState) -> Element<Message> {
             text(path_label).size(12).color(C_TEXT),
             vertical_space().height(6),
             text(repo_status).size(12).color(C_DIM),
-            if let Some(warn) = gitsave_status {
-                text(warn).size(12).color(C_WARN).into()
-            } else {
-                vertical_space().height(0).into()
-            },
+            gitsave_status
+                .map(|warn| text(warn).size(12).color(C_WARN).into())
+                .unwrap_or_else(|| vertical_space().height(0).into()),
             text(format!("Last used: {last_used}")).size(12).color(C_DIM),
             text(format!("Repo size: {repo_size}")).size(12).color(C_DIM),
             vertical_space().height(10),
@@ -1953,7 +1960,7 @@ fn view_routes_panel(s: &MainState) -> Element<Message> {
             switch_btn,
             vertical_space().height(2),
             rename_btn,
-            if s.is_recovery { vertical_space().height(2).into() } else { vertical_space().height(0).into() },
+            recovery_spacer,
             recover_btn,
             vertical_space().height(8),
             button(text(recovery_label).size(12).color(recovery_color))
