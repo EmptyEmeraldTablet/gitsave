@@ -1704,12 +1704,6 @@ fn view_picker_manage_panel(m: &PickerManageState) -> Element<Message> {
         None => vertical_space().height(0).into(),
     };
 
-    let recovery_spacer: Element<Message> = if s.is_recovery {
-        vertical_space().height(2).into()
-    } else {
-        vertical_space().height(0).into()
-    };
-
     container(
         column![
             text("Manage Selected Path").size(12).color(C_DIM),
@@ -1936,6 +1930,12 @@ fn view_routes_panel(s: &MainState) -> Element<Message> {
     let recovery_label =
         if s.is_recovery { "Exit Recovery" } else { "Recovery Mode" };
     let recovery_color = if s.is_recovery { C_WARN } else { C_DIM };
+
+    let recovery_spacer: Element<Message> = if s.is_recovery {
+        vertical_space().height(2).into()
+    } else {
+        vertical_space().height(0).into()
+    };
 
     container(
         column![
