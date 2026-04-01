@@ -1704,6 +1704,12 @@ fn view_picker_manage_panel(m: &PickerManageState) -> Element<Message> {
         None => vertical_space().height(0).into(),
     };
 
+    let gitsave_status_elem: Element<Message> = if let Some(warn) = gitsave_status {
+        text(warn).size(12).color(C_WARN).into()
+    } else {
+        vertical_space().height(0).into()
+    };
+
     container(
         column![
             text("Manage Selected Path").size(12).color(C_DIM),
@@ -1711,9 +1717,7 @@ fn view_picker_manage_panel(m: &PickerManageState) -> Element<Message> {
             text(path_label).size(12).color(C_TEXT),
             vertical_space().height(6),
             text(repo_status).size(12).color(C_DIM),
-            gitsave_status
-                .map(|warn| text(warn).size(12).color(C_WARN).into())
-                .unwrap_or_else(|| vertical_space().height(0).into()),
+            gitsave_status_elem,
             text(format!("Last used: {last_used}")).size(12).color(C_DIM),
             text(format!("Repo size: {repo_size}")).size(12).color(C_DIM),
             vertical_space().height(10),
