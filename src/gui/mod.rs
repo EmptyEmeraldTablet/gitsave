@@ -10,7 +10,7 @@ use iced::widget::{
     button, column, container, horizontal_rule, horizontal_space, row, scrollable, text,
     text_input, vertical_space,
 };
-use iced::{Alignment, Background, Border, Color, Element, Length, Size, Task, Theme, window};
+use iced::{Alignment, Background, Border, Color, Element, Font, Length, Size, Task, Theme, window};
 
 use chrono::Local;
 
@@ -35,6 +35,17 @@ const C_SEL: Color = Color { r: 0.28, g: 0.62, b: 1.00, a: 0.20 };
 const C_RECOVERY: Color = Color { r: 0.92, g: 0.55, b: 0.10, a: 1.0 };
 const MAX_INIT_PREVIEW_ITEMS: usize = 20;
 const DEFAULT_COMPRESSION: i32 = 6;
+
+#[cfg(windows)]
+const UI_FONT_NAME: &str = "Microsoft YaHei UI";
+#[cfg(target_os = "linux")]
+const UI_FONT_NAME: &str = "Noto Sans CJK SC";
+#[cfg(target_os = "macos")]
+const UI_FONT_NAME: &str = "PingFang SC";
+
+fn ui_font() -> Font {
+    Font::with_name(UI_FONT_NAME)
+}
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
@@ -317,6 +328,7 @@ enum Message {
     PickerManageExport,
     PickerManageCleanupChanged(String),
     PickerManageCleanup,
+    NoOp,
     // Init
     InitYes,
     InitNo,
@@ -419,16 +431,17 @@ impl GitsaveApp {
             }
 
             Message::PickerSubmit => {
-                let path = match &self.screen {
-                    Screen::Picker(p) => PathBuf::from(p.input.trim()),
+                let raw = match &self.screen {
+                    Screen::Picker(p) => p.input.clone(),
                     _ => return Task::none(),
                 };
-                if let Screen::Picker(p) = &mut self.screen {
-                    let raw = p.input.trim();
-                    if raw.is_empty() {
+                let Some(path) = normalize_path_string(&raw) else {
+                    if let Screen::Picker(p) = &mut self.screen {
                         p.error = Some("Path cannot be empty".to_string());
-                        return Task::none();
                     }
+                    return Task::none();
+                };
+                if let Screen::Picker(p) = &mut self.screen {
                     if !path.exists() {
                         p.error = Some("Path does not exist".to_string());
                         return Task::none();
@@ -544,6 +557,8 @@ impl GitsaveApp {
                 }
                 Task::none()
             }
+
+            Message::NoOp => Task::none(),
 
             Message::PickerBrowse => Task::perform(
                 async {
@@ -1691,6 +1706,7 @@ fn view_picker(s: &PickerState) -> Element<Message> {
             .on_submit(Message::PickerSubmit)
             .padding([8, 10])
             .size(14)
+            .font(ui_font())
             .width(Length::Fill),
         horizontal_space().width(8),
         button(text(" Browse… ").size(14))
@@ -1718,7 +1734,7 @@ fn view_picker(s: &PickerState) -> Element<Message> {
                 } else {
                     format!("{} · last used {}", p.path, last_used)
                 };
-                button(text(label).size(13))
+                button(text(label).size(13).font(ui_font()))
                     .on_press(Message::PickerSelectManage(path))
                     .style(style_btn_ghost)
                     .padding([5, 10])
@@ -1734,7 +1750,9 @@ fn view_picker(s: &PickerState) -> Element<Message> {
     };
 
     let manage_panel: Element<Message> = match &s.manage {
-        Some(m) => view_picker_manage_panel(m),
+        Some(m) => scrollable(view_picker_manage_panel(m))
+            .height(Length::Fixed(220.0))
+            .into(),
         None => vertical_space().height(0).into(),
     };
 
@@ -1778,7 +1796,11 @@ fn view_init(s: &InitState) -> Element<Message> {
             .take(MAX_INIT_PREVIEW_ITEMS)
             .map(|entry| {
                 let prefix = if entry.is_dir { "[D]" } else { "[F]" };
-                text(format!("{prefix} {}", entry.name)).size(12).color(C_DIM).into()
+                text(format!("{prefix} {}", entry.name))
+                    .size(12)
+                    .color(C_DIM)
+                    .font(ui_font())
+                    .into()
             })
             .collect()
     };
@@ -1852,7 +1874,10 @@ fn view_init(s: &InitState) -> Element<Message> {
         column![
             text("Initialize Gitsave Repository?").size(20).color(C_TEXT),
             vertical_space().height(12),
-            text(s.dir.display().to_string()).size(14).color(C_ACCENT),
+            text(s.dir.display().to_string())
+                .size(14)
+                .color(C_ACCENT)
+                .font(ui_font()),
             vertical_space().height(12),
             text(
                 "This directory does not contain a gitsave repository.\n\
@@ -1927,7 +1952,12 @@ fn view_picker_manage_panel(m: &PickerManageState) -> Element<Message> {
         column![
             text("Manage Selected Path").size(12).color(C_DIM),
             vertical_space().height(6),
-            text(path_label).size(12).color(C_TEXT),
+            text_input("Path", path_label.as_str())
+                .on_input(|_| Message::NoOp)
+                .padding([6, 8])
+                .size(12)
+                .font(ui_font())
+                .width(Length::Fill),
             vertical_space().height(6),
             text(repo_status).size(12).color(C_DIM),
             gitsave_status_elem,
@@ -1974,7 +2004,7 @@ fn view_picker_manage_panel(m: &PickerManageState) -> Element<Message> {
                 .size(12)
                 .width(Length::Fill),
             vertical_space().height(6),
-            button(text("Cleanup").size(12).color(C_ERROR))
+            button(text("Cleanup Repo").size(12).color(C_ERROR))
                 .on_press(Message::PickerManageCleanup)
                 .style(style_btn_secondary)
                 .padding([5, 10]),
@@ -2031,7 +2061,10 @@ fn view_header(s: &MainState) -> Element<Message> {
 
     container(
         row![
-            text(s.dir.display().to_string()).size(12).color(C_DIM),
+            text(s.dir.display().to_string())
+                .size(12)
+                .color(C_DIM)
+                .font(ui_font()),
             text(format!("  ●  {current_name}")).size(13).color(C_ACCENT),
             recovery_badge,
             busy_badge,
