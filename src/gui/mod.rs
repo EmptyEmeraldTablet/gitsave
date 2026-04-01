@@ -446,15 +446,23 @@ impl GitsaveApp {
             Message::PickerSelectManage(path) => self.set_picker_manage(path),
 
             Message::PickerManageOpen => {
+                let mut open_target: Option<PathBuf> = None;
                 if let Screen::Picker(p) = &mut self.screen {
                     if let Some(m) = &mut p.manage {
                         if m.info.has_gitsave {
-                            return self.open_path(m.target.clone());
+                            open_target = Some(m.target.clone());
+                        } else {
+                            m.message = Some(
+                                "No gitsave found. Use Init to create one.".to_string(),
+                            );
                         }
-                        m.message = Some("No gitsave found. Use Init to create one.".to_string());
                     }
                 }
-                Task::none()
+                if let Some(path) = open_target {
+                    self.open_path(path)
+                } else {
+                    Task::none()
+                }
             }
 
             Message::PickerManageInit => {
@@ -792,16 +800,17 @@ impl GitsaveApp {
                         return Task::none();
                     }
                     if let Some(entry) = s.selected_history_entry().cloned() {
+                        let label = entry.message.clone();
                         let action = PendingAction::RollbackSave {
                             target_id: entry.id,
-                            label: entry.message,
+                            label: label.clone(),
                             force: false,
                         };
                         if s.is_dirty() {
                             s.modal = Some(Modal::ResolveDirty {
                                 prompt: format!(
                                     "Roll back to:\n  [{}] {}\n\nSave changes first?",
-                                    entry.short_id, entry.message
+                                    entry.short_id, label
                                 ),
                                 action,
                             });
@@ -809,7 +818,7 @@ impl GitsaveApp {
                             s.modal = Some(Modal::Confirm {
                                 prompt: format!(
                                     "Roll back to save {} ({})? A new route will be created.",
-                                    entry.short_id, entry.message
+                                    entry.short_id, label
                                 ),
                                 action: ConfirmAction::Pending(action),
                             });
@@ -832,15 +841,16 @@ impl GitsaveApp {
                         return Task::none();
                     }
                     if let Some(entry) = s.selected_history_entry().cloned() {
+                        let label = entry.message.clone();
                         let action = PendingAction::RollbackSave {
                             target_id: entry.id,
-                            label: entry.message,
+                            label: label.clone(),
                             force: true,
                         };
                         s.modal = Some(Modal::Confirm {
                             prompt: format!(
                                 "Force roll back to save {} ({})? Unsaved changes will be discarded. A new route will be created.",
-                                entry.short_id, entry.message
+                                entry.short_id, label
                             ),
                             action: ConfirmAction::Pending(action),
                         });
